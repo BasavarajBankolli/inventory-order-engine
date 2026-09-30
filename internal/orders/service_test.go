@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"inventory-order-engine/internal/events"
 	"inventory-order-engine/internal/identity"
 	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/orders"
@@ -42,6 +43,7 @@ func setup(t *testing.T) fixture {
 			Inventory:      inventory.NewService(pool, inventory.NewRepository(pool)),
 			Payments:       payments.NewRepository(pool),
 			Provider:       provider,
+			Outbox:         events.NewOutbox(pool),
 			ReservationTTL: 15 * time.Minute,
 			PaymentTimeout: 200 * time.Millisecond,
 			ReconcileAfter: time.Second,

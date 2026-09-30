@@ -76,6 +76,14 @@ type Config struct {
 	// RateLimitPerMinute is how many requests one user (or IP, for public
 	// routes) may make per minute. 0 disables rate limiting.
 	RateLimitPerMinute int
+
+	// OutboxMaxAttempts: after this many failed publishes an event is
+	// marked FAILED (dead letter) and no longer retried.
+	OutboxMaxAttempts int
+
+	// OutboxFailureRate (0.0-1.0) makes the demo publisher fail on purpose,
+	// to watch retries. 0 in normal use.
+	OutboxFailureRate float64
 }
 
 // minJWTSecretLen: HMAC-SHA256 keys shorter than 32 bytes (256 bits) are
@@ -102,6 +110,7 @@ func Load() (Config, error) {
 		RedisURL:              os.Getenv("REDIS_URL"),
 		ProductCacheTTL:       5 * time.Minute,
 		RateLimitPerMinute:    100,
+		OutboxMaxAttempts:     10,
 	}
 
 	// Required values: there is no safe default for a database password.
@@ -202,6 +211,22 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("RATE_LIMIT_PER_MINUTE must be 0 (off) or a positive integer, got %q", v)
 		}
 		cfg.RateLimitPerMinute = n
+	}
+
+	if v := os.Getenv("OUTBOX_MAX_ATTEMPTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return Config{}, fmt.Errorf("OUTBOX_MAX_ATTEMPTS must be a positive integer, got %q", v)
+		}
+		cfg.OutboxMaxAttempts = n
+	}
+
+	if v := os.Getenv("OUTBOX_FAILURE_RATE"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 || f > 1 {
+			return Config{}, fmt.Errorf("OUTBOX_FAILURE_RATE must be between 0 and 1, got %q", v)
+		}
+		cfg.OutboxFailureRate = f
 	}
 
 	return cfg, nil

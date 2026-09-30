@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"inventory-order-engine/internal/database"
+	"inventory-order-engine/internal/events"
 	"inventory-order-engine/internal/identity"
 	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/payments"
@@ -31,6 +32,7 @@ type Service struct {
 	inventory *inventory.Service
 	payments  *payments.Repository
 	provider  payments.Provider
+	outbox    *events.Outbox
 
 	reservationTTL time.Duration // how long stock is held for an unpaid order
 	paymentTimeout time.Duration // how long we wait for the payment provider
@@ -46,6 +48,7 @@ type Deps struct {
 	Inventory      *inventory.Service
 	Payments       *payments.Repository
 	Provider       payments.Provider
+	Outbox         *events.Outbox
 	ReservationTTL time.Duration
 	PaymentTimeout time.Duration
 	// ReconcileAfter: how long after a reservation expired the worker waits
@@ -63,6 +66,7 @@ func NewService(d Deps) *Service {
 		inventory:      d.Inventory,
 		payments:       d.Payments,
 		provider:       d.Provider,
+		outbox:         d.Outbox,
 		reservationTTL: d.ReservationTTL,
 		paymentTimeout: d.PaymentTimeout,
 		reconcileAfter: d.ReconcileAfter,
@@ -207,11 +211,29 @@ func (s *Service) createInTx(ctx context.Context, caller identity.Principal, req
 		for i, it := range items {
 			lines[i] = inventory.ReserveLine{ProductID: it.ProductID, Quantity: it.Quantity}
 		}
-		if _, err := s.inventory.ReserveForOrder(ctx, tx, created.ID, lines, s.reservationTTL); err != nil {
+		reservations, err := s.inventory.ReserveForOrder(ctx, tx, created.ID, lines, s.reservationTTL)
+		if err != nil {
 			return err // ErrOutOfStock -> the order insert above is rolled back too
 		}
 
-		return s.transition(ctx, repo, &created, StatusReserved)
+		if err := s.transition(ctx, repo, &created, StatusReserved); err != nil {
+			return err
+		}
+
+		// Events go into the outbox in THIS transaction: if anything above
+		// fails, they are rolled back together with the order.
+		if err := s.emit(ctx, tx, events.OrderCreated, created.ID, orderCreatedPayload{
+			OrderID: created.ID, UserID: created.UserID, TotalAmount: created.TotalAmount,
+			Currency: created.Currency, Items: created.Items,
+		}); err != nil {
+			return err
+		}
+		reserved := inventoryReservedPayload{OrderID: created.ID}
+		for _, r := range reservations {
+			reserved.ExpiresAt = r.ExpiresAt // same for every line (one transaction, one now())
+			reserved.Items = append(reserved.Items, reservedItem{ProductID: r.ProductID, Quantity: r.Quantity})
+		}
+		return s.emit(ctx, tx, events.InventoryReserved, created.ID, reserved)
 	})
 	if err != nil {
 		return Order{}, err
@@ -328,6 +350,10 @@ func (s *Service) Cancel(ctx context.Context, caller identity.Principal, id int6
 		// then simply does nothing.
 		released, err = s.inventory.ReleaseForOrder(ctx, tx, o.ID, inventory.ReservationReleased)
 		if err != nil {
+			return err
+		}
+		if err := s.emit(ctx, tx, events.OrderCancelled, o.ID,
+			orderClosedPayload{OrderID: o.ID, Reason: reasonCustomerCancelled}); err != nil {
 			return err
 		}
 

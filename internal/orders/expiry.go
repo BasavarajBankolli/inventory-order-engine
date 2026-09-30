@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"inventory-order-engine/internal/database"
+	"inventory-order-engine/internal/events"
 	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/payments"
 )
@@ -95,6 +96,10 @@ func (s *Service) expireReserved(ctx context.Context, orderID int64) (changed bo
 		if err != nil {
 			return err
 		}
+		if err := s.emit(ctx, tx, events.OrderExpired, orderID,
+			orderClosedPayload{OrderID: orderID, Reason: reasonReservationExpired}); err != nil {
+			return err
+		}
 		changed = true
 		slog.InfoContext(ctx, "reservation expired; order expired and stock released",
 			"order_id", orderID, "reservations_released", released)
@@ -176,6 +181,10 @@ func (s *Service) expireUncharged(ctx context.Context, orderID, paymentID int64)
 			return err
 		}
 		if _, err := s.inventory.ReleaseForOrder(ctx, tx, orderID, inventory.ReservationExpired); err != nil {
+			return err
+		}
+		if err := s.emit(ctx, tx, events.OrderExpired, orderID,
+			orderClosedPayload{OrderID: orderID, Reason: reasonNotChargedInTime}); err != nil {
 			return err
 		}
 		changed = true

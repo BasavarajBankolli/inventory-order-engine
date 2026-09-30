@@ -19,6 +19,7 @@ import (
 	"inventory-order-engine/internal/auth"
 	"inventory-order-engine/internal/cache"
 	"inventory-order-engine/internal/config"
+	"inventory-order-engine/internal/events"
 	"inventory-order-engine/internal/health"
 	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/orders"
@@ -87,6 +88,7 @@ func newServices(cfg config.Config, pool *pgxpool.Pool, opts Options) (*services
 		Inventory:      inventoryService,
 		Payments:       payments.NewRepository(pool),
 		Provider:       payments.NewMockProvider(pool, outcome),
+		Outbox:         events.NewOutbox(pool),
 		ReservationTTL: cfg.ReservationTTL,
 		PaymentTimeout: cfg.PaymentTimeout,
 		ReconcileAfter: cfg.PaymentReconcileAfter,

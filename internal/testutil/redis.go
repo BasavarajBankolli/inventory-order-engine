@@ -11,9 +11,15 @@ import (
 	"inventory-order-engine/internal/requestid"
 )
 
-// newClient mirrors cache.NewRedisClient. testutil must not import the
-// cache package: cache imports products, and products' own tests import
-// testutil - that would be an import cycle.
+// newClient builds a client for TESTS. (testutil must not import the cache
+// package: cache imports products, and products' own tests import testutil -
+// an import cycle.)
+//
+// Unlike production (cache.NewRedisClient, tuned to fail fast), test clients
+// use generous timeouts and NO retries: when the whole suite runs in
+// parallel under -race, a 300 ms timeout can expire, and a retried INCR can
+// be counted twice by Redis - making correct code look broken. Fail-fast
+// behaviour itself is tested with the real production client.
 func newClient(t *testing.T, url string) *redis.Client {
 	t.Helper()
 	opts, err := redis.ParseURL(url)
@@ -21,9 +27,10 @@ func newClient(t *testing.T, url string) *redis.Client {
 		t.Fatalf("parse redis url: %v", err)
 	}
 	opts.DialTimeout = time.Second
-	opts.ReadTimeout = 300 * time.Millisecond
-	opts.WriteTimeout = 300 * time.Millisecond
-	opts.MaxRetries = 1
+	opts.ReadTimeout = 3 * time.Second
+	opts.WriteTimeout = 3 * time.Second
+	opts.PoolTimeout = 5 * time.Second
+	opts.MaxRetries = -1 // -1 = never retry
 	return redis.NewClient(opts)
 }
 

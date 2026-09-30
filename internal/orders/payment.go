@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"inventory-order-engine/internal/database"
+	"inventory-order-engine/internal/events"
 	"inventory-order-engine/internal/identity"
 	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/money"
@@ -181,8 +182,13 @@ func (s *Service) completePayment(ctx context.Context, orderID, paymentID int64,
 			if err := s.transition(ctx, repo, &o, StatusConfirmed); err != nil {
 				return err
 			}
-			_, err = s.inventory.ConfirmForOrder(ctx, tx, orderID)
-			return err
+			if _, err := s.inventory.ConfirmForOrder(ctx, tx, orderID); err != nil {
+				return err
+			}
+			return s.emit(ctx, tx, events.OrderConfirmed, orderID, orderConfirmedPayload{
+				OrderID: orderID, PaymentID: pay.ID, ProviderReference: pay.ProviderReference,
+				Amount: pay.Amount, Currency: pay.Currency,
+			})
 		}
 
 		// Declined.
@@ -196,8 +202,11 @@ func (s *Service) completePayment(ctx context.Context, orderID, paymentID int64,
 		if err := s.transition(ctx, repo, &o, StatusCancelled); err != nil {
 			return err
 		}
-		_, err = s.inventory.ReleaseForOrder(ctx, tx, orderID, inventory.ReservationReleased)
-		return err
+		if _, err := s.inventory.ReleaseForOrder(ctx, tx, orderID, inventory.ReservationReleased); err != nil {
+			return err
+		}
+		return s.emit(ctx, tx, events.OrderCancelled, orderID,
+			orderClosedPayload{OrderID: orderID, Reason: reasonPaymentDeclined})
 	})
 	if err != nil {
 		return PayResult{}, err

@@ -162,6 +162,7 @@ are the dangerous ones. Always test with the failure you'll really get.
 | Many requests incrementing one counter at once | `INCR` is atomic, and 200 → exactly 100 allowed is tested |
 | Stale-set race in cache-aside (see above) | Bounded by the TTL. Orders never read the cache |
 | Several API instances | They share Redis, so they share counters and cache |
+| A retried `INCR` after a timeout | If the first `INCR` reached Redis but its reply was lost, the client's retry counts the request **twice**. The limiter becomes slightly *stricter*, which is the safe direction. (Found in Stage 12: under heavy test load this made the exact-count test flaky, so test clients now use generous timeouts and no retries.) |
 | Thundering herd (a popular key expires and 1,000 requests all miss at once) | Not handled. Each miss is one cheap PK lookup at this scale. Mitigations: a lock per key ("single-flight") or early refresh |
 
 ## How can I reproduce/test it?

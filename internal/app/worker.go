@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"inventory-order-engine/internal/config"
+	"inventory-order-engine/internal/events"
 	"inventory-order-engine/internal/worker"
 )
 
@@ -32,5 +33,20 @@ func NewWorkerJobs(cfg config.Config, pool *pgxpool.Pool) ([]worker.Job, error) 
 		},
 	}
 
-	return []worker.Job{expireReservations}, nil
+	processor := events.NewProcessor(pool, events.NewOutbox(pool),
+		events.LogPublisher{FailureRate: cfg.OutboxFailureRate}, cfg.OutboxMaxAttempts)
+
+	publishEvents := worker.Job{
+		Name: "publish-outbox",
+		Run: func(ctx context.Context) error {
+			res, err := processor.Drain(ctx, cfg.WorkerBatchSize, 20)
+			if res.Published+res.Retrying+res.Dead > 0 {
+				slog.InfoContext(ctx, "publish-outbox run finished",
+					"published", res.Published, "retrying", res.Retrying, "dead", res.Dead)
+			}
+			return err
+		},
+	}
+
+	return []worker.Job{expireReservations, publishEvents}, nil
 }

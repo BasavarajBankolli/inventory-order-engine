@@ -115,6 +115,9 @@ func TestLoad_Errors(t *testing.T) {
 		{"DB_MAX_CONNS zero", map[string]string{"DB_MAX_CONNS": "0"}},
 		{"bad LOG_LEVEL", map[string]string{"LOG_LEVEL": "loud"}},
 		{"bad SHUTDOWN_TIMEOUT", map[string]string{"SHUTDOWN_TIMEOUT": "ten"}},
+		{"OUTBOX_MAX_ATTEMPTS zero", map[string]string{"OUTBOX_MAX_ATTEMPTS": "0"}},
+		{"OUTBOX_FAILURE_RATE above 1", map[string]string{"OUTBOX_FAILURE_RATE": "1.5"}},
+		{"RATE_LIMIT_PER_MINUTE negative", map[string]string{"RATE_LIMIT_PER_MINUTE": "-1"}},
 	}
 
 	for _, tt := range tests {

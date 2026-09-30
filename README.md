@@ -6,7 +6,7 @@ It is built to handle concurrent orders correctly and **never oversell stock**.
 This is a learning and portfolio project, so the code favours clarity over cleverness.
 Each module has a matching explanation in [`docs/learning/`](docs/learning/).
 
-> **Status: Stage 11 of 15 — orders, reservations, concurrency, idempotency, payments, worker, Redis.**
+> **Status: Stage 12 of 15 — orders, reservations, concurrency, idempotency, payments, worker, Redis, outbox events.**
 > This README grows with each stage.
 
 ---
@@ -19,7 +19,7 @@ flowchart LR
     subgraph docker compose
         migrate[migrate<br/>runs once, exits] -->|applies SQL| pg[(PostgreSQL 17)]
         api[api<br/>Go HTTP server] -->|pgx pool| pg
-        worker[worker<br/>expires reservations,<br/>reconciles payments] -->|pgx pool| pg
+        worker[worker<br/>expires reservations,<br/>reconciles payments,<br/>publishes outbox events] -->|pgx pool| pg
         api -->|cache + rate limit<br/>optional| redis[(Redis 7)]
     end
 ```
@@ -145,6 +145,19 @@ running the worker twice, or two workers at once, is safe. Details:
 
 Details: [docs/learning/11-redis.md](docs/learning/11-redis.md).
 
+### Events: transactional outbox
+
+`OrderCreated`, `InventoryReserved`, `OrderConfirmed`, `OrderCancelled` and `OrderExpired` are
+written to `outbox_events` **in the same transaction** as the change, so an event is never lost
+and never describes a change that rolled back. The worker publishes them:
+
+- **In order per order.** An order's later events wait for its earlier ones.
+- **Several workers can run at once.** `FOR UPDATE SKIP LOCKED` means each event is published once.
+- **Retries** use exponential backoff. After 10 failures an event becomes `FAILED` (dead letter).
+
+Delivery is at-least-once, so consumers must ignore event ids they've already seen. Details:
+[docs/learning/12-outbox.md](docs/learning/12-outbox.md).
+
 ### Folder layout
 
 ```text
@@ -158,6 +171,7 @@ internal/
   auth/                Register/login service, bcrypt, JWT, RequireAuth/RequireRole middleware
   cache/               Redis client (fail-fast + circuit breaker) and product cache
   config/              Reads settings from environment variables
+  events/              Transactional outbox: write events in the business tx, publish with retries
   database/            PostgreSQL pool, migration runner, WithTx transaction helper
   health/              /health (liveness) and /ready (readiness)
   inventory/           Stock levels: domain rules, row locking, optimistic versioning
@@ -182,7 +196,7 @@ docs/learning/         Beginner-friendly explanations for every module
 tests/                 End-to-end API tests (HTTP -> router -> services -> PostgreSQL)
 ```
 
-The `events/` package (outbox) is added in Stage 12. There is no `pkg/` folder, because
+There is no `pkg/` folder, because
 nothing here is meant to be imported by other projects.
 
 ## Technology choices
@@ -396,7 +410,7 @@ docker compose exec postgres psql -U app -d inventory -c "UPDATE users SET role 
 9. ✅ Mock payments
 10. ✅ Background workers (reservation expiry)
 11. ✅ Redis (cache and rate limiting)
-12. Transactional outbox
+12. ✅ Transactional outbox
 13. Test suite hardening
 14. Observability (Prometheus metrics)
 15. Deployment and full documentation

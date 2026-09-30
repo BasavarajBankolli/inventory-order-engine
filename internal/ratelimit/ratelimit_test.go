@@ -87,7 +87,8 @@ func TestAllow_ConcurrentRequestsAreCountedExactly(t *testing.T) {
 	l := NewLimiter(rdb, 100, time.Minute, prefix)
 	fixedClock(l, time.Date(2026, 9, 30, 12, 0, 30, 0, time.UTC))
 
-	var allowed atomic.Int64
+	var allowed, failed atomic.Int64
+	var firstErr atomic.Value
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for i := 0; i < 200; i++ {
@@ -95,7 +96,12 @@ func TestAllow_ConcurrentRequestsAreCountedExactly(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if d, err := l.Allow(context.Background(), "user:hot"); err == nil && d.Allowed {
+			d, err := l.Allow(context.Background(), "user:hot")
+			switch {
+			case err != nil:
+				failed.Add(1)
+				firstErr.CompareAndSwap(nil, err.Error())
+			case d.Allowed:
 				allowed.Add(1)
 			}
 		}()
@@ -103,6 +109,9 @@ func TestAllow_ConcurrentRequestsAreCountedExactly(t *testing.T) {
 	close(start)
 	wg.Wait()
 
+	if failed.Load() > 0 {
+		t.Fatalf("%d calls failed (first: %v) - the counter result is meaningless", failed.Load(), firstErr.Load())
+	}
 	if allowed.Load() != 100 {
 		t.Errorf("allowed = %d, want exactly 100", allowed.Load())
 	}

@@ -96,6 +96,8 @@ services:
       WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-100}
       PAYMENT_TIMEOUT: ${PAYMENT_TIMEOUT:-5s}
       PAYMENT_RECONCILE_AFTER: ${PAYMENT_RECONCILE_AFTER:-1m}
+      OUTBOX_MAX_ATTEMPTS: ${OUTBOX_MAX_ATTEMPTS:-10}
+      OUTBOX_FAILURE_RATE: ${OUTBOX_FAILURE_RATE:-0}
     depends_on:
       migrate:
         condition: service_completed_successfully
