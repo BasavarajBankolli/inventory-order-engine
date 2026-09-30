@@ -4,8 +4,9 @@
 #
 # Start-up order (enforced with depends_on conditions):
 #   postgres (healthy) -> migrate (runs once, exits 0) -> api
+#                                                       -> worker
 #
-# Redis and the background worker are added in later stages.
+# Redis is added in a later stage.
 #
 # Values like ${POSTGRES_PASSWORD:-app_dev_password} read from your shell or
 # from a .env file next to this file, falling back to a LOCAL-ONLY default.
@@ -65,6 +66,21 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["/app/worker"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app_dev_password}@postgres:5432/${POSTGRES_DB:-inventory}?sslmode=disable
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WORKER_INTERVAL: ${WORKER_INTERVAL:-10s}
+      WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-100}
+      PAYMENT_TIMEOUT: ${PAYMENT_TIMEOUT:-5s}
+      PAYMENT_RECONCILE_AFTER: ${PAYMENT_RECONCILE_AFTER:-1m}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:

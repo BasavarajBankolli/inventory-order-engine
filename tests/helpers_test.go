@@ -37,11 +37,12 @@ func newTestAPI(t *testing.T) *testAPI {
 	pool := testutil.NewMigratedPool(t)
 
 	cfg := config.Config{
-		JWTSecret:          "api-test-secret-that-is-at-least-32-bytes",
-		JWTTTL:             time.Hour,
-		ReservationTTL:     15 * time.Minute,
-		PaymentTimeout:     300 * time.Millisecond, // keeps TIMEOUT tests fast
-		MockPaymentOutcome: "SUCCESS",
+		JWTSecret:             "api-test-secret-that-is-at-least-32-bytes",
+		JWTTTL:                time.Hour,
+		ReservationTTL:        15 * time.Minute,
+		PaymentTimeout:        300 * time.Millisecond, // keeps TIMEOUT tests fast
+		MockPaymentOutcome:    "SUCCESS",
+		PaymentReconcileAfter: time.Second,
 	}
 	handler, err := app.NewHandler(cfg, pool, logging.New(io.Discard, slog.LevelInfo),
 		app.Options{BcryptCost: bcrypt.MinCost})

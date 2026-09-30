@@ -1,8 +1,9 @@
 // Package app builds the complete application: it creates every module's
 // repository, service and handler and connects them (dependency injection).
 //
-// Both cmd/api (production) and the API tests call NewHandler, so the tests
-// exercise exactly the same wiring that runs in production.
+// cmd/api calls NewHandler, cmd/worker calls NewWorkerJobs, and the API tests
+// call NewHandler too - so tests exercise exactly the wiring that runs in
+// production, and the API and the worker share one definition of it.
 package app
 
 import (
@@ -30,8 +31,17 @@ type Options struct {
 	BcryptCost int
 }
 
-// NewHandler wires all modules together and returns the HTTP handler.
-func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts Options) (http.Handler, error) {
+// services holds every business service, built once.
+type services struct {
+	userRepo  *users.Repository
+	tokens    *auth.TokenManager
+	auth      *auth.Service
+	products  *products.Service
+	inventory *inventory.Service
+	orders    *orders.Service
+}
+
+func newServices(cfg config.Config, pool *pgxpool.Pool, opts Options) (*services, error) {
 	if opts.BcryptCost == 0 {
 		opts.BcryptCost = bcrypt.DefaultCost
 	}
@@ -40,7 +50,6 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts
 	userRepo := users.NewRepository(pool)
 	productRepo := products.NewRepository(pool)
 	inventoryRepo := inventory.NewRepository(pool)
-	orderRepo := orders.NewRepository(pool)
 
 	// Services (business logic)
 	tokens := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTTTL)
@@ -48,33 +57,50 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts
 	if err != nil {
 		return nil, err
 	}
-	productService := products.NewService(pool, productRepo, inventoryRepo)
 	inventoryService := inventory.NewService(pool, inventoryRepo)
+
 	// The only provider implementation is the mock. A real one (Stripe,
 	// Razorpay, ...) would be chosen here from configuration.
 	outcome, _ := payments.ParseOutcome(cfg.MockPaymentOutcome) // validated by config
 	orderService := orders.NewService(orders.Deps{
 		Pool:           pool,
-		Orders:         orderRepo,
+		Orders:         orders.NewRepository(pool),
 		Products:       productRepo,
 		Inventory:      inventoryService,
 		Payments:       payments.NewRepository(pool),
-		Provider:       payments.NewMockProvider(outcome),
+		Provider:       payments.NewMockProvider(pool, outcome),
 		ReservationTTL: cfg.ReservationTTL,
 		PaymentTimeout: cfg.PaymentTimeout,
+		ReconcileAfter: cfg.PaymentReconcileAfter,
 	})
 
-	// Handlers (HTTP)
+	return &services{
+		userRepo:  userRepo,
+		tokens:    tokens,
+		auth:      authService,
+		products:  products.NewService(pool, productRepo, inventoryRepo),
+		inventory: inventoryService,
+		orders:    orderService,
+	}, nil
+}
+
+// NewHandler wires all modules together and returns the HTTP handler.
+func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts Options) (http.Handler, error) {
+	s, err := newServices(cfg, pool, opts)
+	if err != nil {
+		return nil, err
+	}
+
 	return server.NewRouter(server.Deps{
 		Logger: logger,
 		Health: health.NewHandler(map[string]health.CheckFunc{
 			"postgres": pool.Ping,
 		}),
-		Auth:        auth.NewHandler(authService),
-		Users:       users.NewHandler(userRepo),
-		Products:    products.NewHandler(productService),
-		Inventory:   inventory.NewHandler(inventoryService),
-		Orders:      orders.NewHandler(orderService),
-		RequireAuth: auth.RequireAuth(tokens),
+		Auth:        auth.NewHandler(s.auth),
+		Users:       users.NewHandler(s.userRepo),
+		Products:    products.NewHandler(s.products),
+		Inventory:   inventory.NewHandler(s.inventory),
+		Orders:      orders.NewHandler(s.orders),
+		RequireAuth: auth.RequireAuth(s.tokens),
 	}), nil
 }

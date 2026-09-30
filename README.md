@@ -6,7 +6,7 @@ It is built to handle concurrent orders correctly and **never oversell stock**.
 This is a learning and portfolio project, so the code favours clarity over cleverness.
 Each module has a matching explanation in [`docs/learning/`](docs/learning/).
 
-> **Status: Stage 9 of 15 — orders, reservations, concurrency, idempotency, mock payments.**
+> **Status: Stage 10 of 15 — orders, reservations, concurrency, idempotency, payments, background worker.**
 > This README grows with each stage.
 
 ---
@@ -19,6 +19,7 @@ flowchart LR
     subgraph docker compose
         migrate[migrate<br/>runs once, exits] -->|applies SQL| pg[(PostgreSQL 17)]
         api[api<br/>Go HTTP server] -->|pgx pool| pg
+        worker[worker<br/>expires reservations,<br/>reconciles payments] -->|pgx pool| pg
     end
 ```
 
@@ -119,6 +120,17 @@ The provider is called **outside** any transaction (no locks held during the slo
 same provider idempotency key is used on every retry, so a timeout followed by a retry never
 charges twice. Details: [docs/learning/09-payments.md](docs/learning/09-payments.md).
 
+### Background worker
+
+`cmd/worker` runs every `WORKER_INTERVAL` (10 s) and:
+
+- expires `RESERVED` orders whose reservation ran out (`RESERVATION_TTL`, 15 min), returning their stock;
+- resolves `PAYMENT_PENDING` orders stuck after a timeout by **asking the provider** what happened (never guessing): confirmed, cancelled, or expired.
+
+Each order is handled in its own transaction that locks the order and re-checks its state, so
+running the worker twice, or two workers at once, is safe. Details:
+[docs/learning/10-workers.md](docs/learning/10-workers.md).
+
 ### Folder layout
 
 ```text
@@ -126,6 +138,7 @@ cmd/
   api/main.go          Starts the HTTP server (wiring only, no business logic)
   concurrency-demo/    Fires N simultaneous orders at the running API and reports the outcome
   migrate/main.go      Applies pending SQL migrations, then exits
+  worker/main.go       Background jobs: reservation expiry and payment reconciliation
 internal/
   app/                 Builds every module and connects them (used by main and API tests)
   auth/                Register/login service, bcrypt, JWT, RequireAuth/RequireRole middleware
@@ -146,13 +159,14 @@ internal/
   testutil/            Helpers used only by tests (isolated, migrated test schemas)
   users/               User model, users repository (SQL), GET /users/me
   validate/            Collects per-field validation errors
+  worker/              Periodic job runner (errors/panics never stop it)
 migrations/            Numbered .sql files, embedded into the binary
 docker/postgres/init/  One-time Postgres setup (creates the test database)
 docs/learning/         Beginner-friendly explanations for every module
 tests/                 End-to-end API tests (HTTP -> router -> services -> PostgreSQL)
 ```
 
-Packages such as `events/`, `worker/`,
+Packages such as `events/`,
 and `cache/` are added in later stages. There is no `pkg/` folder, because
 nothing here is meant to be imported by other projects.
 
@@ -363,7 +377,7 @@ docker compose exec postgres psql -U app -d inventory -c "UPDATE users SET role 
 7. ✅ Transactions and concurrency (100 concurrent buyers, 1 item in stock)
 8. ✅ Idempotency keys
 9. ✅ Mock payments
-10. Background workers (reservation expiry)
+10. ✅ Background workers (reservation expiry)
 11. Redis (cache and rate limiting)
 12. Transactional outbox
 13. Test suite hardening

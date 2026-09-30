@@ -14,7 +14,8 @@ COPY . .
 # CGO_ENABLED=0 -> a static binary that runs on any Linux without libc.
 # -trimpath and -ldflags="-s -w" make the binaries smaller and reproducible.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api && \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
 
 # ---------- Stage 2: run ----------
 # A tiny image containing only our binaries (~20 MB instead of ~800 MB).
@@ -27,7 +28,7 @@ WORKDIR /app
 RUN adduser -D -u 10001 appuser
 USER appuser
 
-COPY --from=build /out/api /out/migrate /app/
+COPY --from=build /out/api /out/migrate /out/worker /app/
 
 EXPOSE 8080
 CMD ["/app/api"]

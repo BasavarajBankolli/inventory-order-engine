@@ -81,6 +81,28 @@ func TestLoadAPI_JWTSettings(t *testing.T) {
 	}
 }
 
+// The worker must never resolve a PAYMENT_PENDING order while a charge may
+// still be in flight, so the grace period has to outlast the payment timeout.
+func TestLoad_ReconcileMustOutlastPaymentTimeout(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5432/db")
+	t.Setenv("PAYMENT_TIMEOUT", "30s")
+	t.Setenv("PAYMENT_RECONCILE_AFTER", "10s")
+	if _, err := Load(); err == nil {
+		t.Error("Load() accepted PAYMENT_RECONCILE_AFTER <= PAYMENT_TIMEOUT")
+	}
+
+	t.Setenv("PAYMENT_RECONCILE_AFTER", "2m")
+	t.Setenv("WORKER_INTERVAL", "5s")
+	t.Setenv("WORKER_BATCH_SIZE", "50")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PaymentReconcileAfter != 2*time.Minute || cfg.WorkerInterval != 5*time.Second || cfg.WorkerBatchSize != 50 {
+		t.Errorf("unexpected config: %+v", cfg)
+	}
+}
+
 func TestLoad_Errors(t *testing.T) {
 	// Table-driven test: each row is one scenario. This is the most common
 	// testing style in Go.

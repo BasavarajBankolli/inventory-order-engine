@@ -12,6 +12,16 @@ import (
 
 // Integration tests for Stage 9 (skipped without TEST_DATABASE_URL).
 
+// charges returns how many times the mock provider actually took money.
+func (f fixture) charges(t *testing.T) int {
+	t.Helper()
+	n, err := f.provider.Charges(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func simulate(o payments.Outcome) context.Context {
 	return payments.WithSimulatedOutcome(context.Background(), o)
 }
@@ -68,8 +78,8 @@ func TestPay_Success(t *testing.T) {
 	if r := f.reservationStatuses(t, o.ID); r["CONFIRMED"] != 1 || len(r) != 1 {
 		t.Errorf("reservations = %v, want 1 CONFIRMED", r)
 	}
-	if f.provider.Charges() != 1 {
-		t.Errorf("charges = %d, want 1", f.provider.Charges())
+	if f.charges(t) != 1 {
+		t.Errorf("charges = %d, want 1", f.charges(t))
 	}
 	f.assertInvariant(t)
 }
@@ -96,8 +106,8 @@ func TestPay_FailureReleasesStock(t *testing.T) {
 	if r := f.reservationStatuses(t, o.ID); r["RELEASED"] != 1 {
 		t.Errorf("reservations = %v, want RELEASED", r)
 	}
-	if f.provider.Charges() != 0 {
-		t.Errorf("charges = %d, want 0", f.provider.Charges())
+	if f.charges(t) != 0 {
+		t.Errorf("charges = %d, want 0", f.charges(t))
 	}
 	f.assertInvariant(t)
 }
@@ -130,8 +140,8 @@ func TestPay_TimeoutThenRetryChargesOnce(t *testing.T) {
 	if err != nil || res.Order.Status != orders.StatusConfirmed {
 		t.Fatalf("retry: %+v, %v", res.Order.Status, err)
 	}
-	if f.provider.Charges() != 1 {
-		t.Errorf("charges = %d, want exactly 1 (no double charge)", f.provider.Charges())
+	if f.charges(t) != 1 {
+		t.Errorf("charges = %d, want exactly 1 (no double charge)", f.charges(t))
 	}
 	if s := f.stockOf(t, p); s != (stock{8, 0}) {
 		t.Errorf("after confirm: %+v, want 8/0", s)
@@ -151,8 +161,8 @@ func TestPay_IsIdempotentAfterSuccess(t *testing.T) {
 	if err != nil || second.Payment.ID != first.Payment.ID || second.Order.Status != orders.StatusConfirmed {
 		t.Errorf("second Pay() = %+v, %v; want the same confirmed payment", second, err)
 	}
-	if f.provider.Charges() != 1 {
-		t.Errorf("charges = %d, want 1", f.provider.Charges())
+	if f.charges(t) != 1 {
+		t.Errorf("charges = %d, want 1", f.charges(t))
 	}
 }
 
@@ -175,8 +185,8 @@ func TestPay_ConcurrentClicksChargeOnce(t *testing.T) {
 	if len(failures) > 0 {
 		t.Errorf("%d calls did not return a confirmed order, first: %v", len(failures), failures[0])
 	}
-	if f.provider.Charges() != 1 {
-		t.Errorf("charges = %d, want 1", f.provider.Charges())
+	if f.charges(t) != 1 {
+		t.Errorf("charges = %d, want 1", f.charges(t))
 	}
 	if n := f.count(t, `SELECT count(*) FROM payments WHERE order_id = $1`, o.ID); n != 1 {
 		t.Errorf("%d payment rows, want 1", n)
@@ -215,8 +225,8 @@ func TestPay_Rejections(t *testing.T) {
 	if _, err := f.svc.Pay(ctx, f.alice, o2.ID); !errors.Is(err, orders.ErrReservationExpired) {
 		t.Errorf("pay expired order: %v, want ErrReservationExpired", err)
 	}
-	if f.provider.Charges() != 0 {
-		t.Errorf("charges = %d, want 0", f.provider.Charges())
+	if f.charges(t) != 0 {
+		t.Errorf("charges = %d, want 0", f.charges(t))
 	}
 }
 

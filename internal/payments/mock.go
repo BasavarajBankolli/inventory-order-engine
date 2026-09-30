@@ -2,10 +2,14 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
-	"sync"
-	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"inventory-order-engine/internal/database"
+	"inventory-order-engine/internal/requestid"
 )
 
 // Outcome tells the mock how to behave for a charge.
@@ -39,24 +43,23 @@ func WithSimulatedOutcome(ctx context.Context, o Outcome) context.Context {
 	return context.WithValue(ctx, outcomeKey{}, o)
 }
 
-// MockProvider is an in-memory fake payment provider.
+// MockProvider is a fake payment provider whose "servers" are the
+// mock_provider_charges table (see migration 000009), so the API and the
+// worker process see the same charges.
 //
 // Like a real provider it is IDEMPOTENT per IdempotencyKey: the first
-// request for a key decides the result, later requests with the same key
-// get that stored result back and are NOT charged again. Its memory is lost
-// when the process restarts - fine for a mock.
+// request for a key decides the result; later requests with the same key
+// get that stored result back and are NOT charged again.
 type MockProvider struct {
+	db             database.DBTX
 	defaultOutcome Outcome
-
-	mu        sync.Mutex
-	processed map[string]Result // idempotency key -> result
-	charges   int               // how many times money was actually taken
 }
 
 // NewMockProvider creates a mock that uses defaultOutcome unless a request
-// context carries a simulated outcome.
-func NewMockProvider(defaultOutcome Outcome) *MockProvider {
-	return &MockProvider{defaultOutcome: defaultOutcome, processed: map[string]Result{}}
+// context carries a simulated outcome. db is the connection pool: the
+// "provider" is an external system, so it never joins our transactions.
+func NewMockProvider(db database.DBTX, defaultOutcome Outcome) *MockProvider {
+	return &MockProvider{db: db, defaultOutcome: defaultOutcome}
 }
 
 // Charge implements Provider.
@@ -66,26 +69,26 @@ func (m *MockProvider) Charge(ctx context.Context, req ChargeRequest) (Result, e
 		outcome = o
 	}
 
-	m.mu.Lock()
-	// Provider-side idempotency: a retry gets the original answer.
-	if res, seen := m.processed[req.IdempotencyKey]; seen {
-		m.mu.Unlock()
-		return res, nil
+	res := Result{Status: ResultSucceeded, Reference: "mock_ch_" + requestid.New()[:16]}
+	if outcome == OutcomeFailure {
+		res = Result{Status: ResultDeclined, FailureReason: "card_declined"}
 	}
 
-	var res Result
-	switch outcome {
-	case OutcomeFailure:
-		res = Result{Status: ResultDeclined, FailureReason: "card_declined"}
-	default: // SUCCESS and TIMEOUT both take the money
-		m.charges++
-		res = Result{
-			Status:    ResultSucceeded,
-			Reference: fmt.Sprintf("mock_ch_%d_%d", time.Now().UnixNano(), m.charges),
-		}
+	// INSERT ... ON CONFLICT DO NOTHING is the provider's idempotency: only
+	// the first request for a key stores a result. If the key already
+	// exists, nothing is inserted (no row returned) and we answer with the
+	// stored result instead - a retry is never charged twice.
+	tag, err := m.db.Exec(ctx, `
+		INSERT INTO mock_provider_charges (idempotency_key, status, reference, failure_reason, amount, currency)
+		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6)
+		ON CONFLICT (idempotency_key) DO NOTHING`,
+		req.IdempotencyKey, res.Status, res.Reference, res.FailureReason, req.Amount.Amount, req.Amount.Currency)
+	if err != nil {
+		return Result{}, fmt.Errorf("%w: %w", ErrProviderUnavailable, err)
 	}
-	m.processed[req.IdempotencyKey] = res
-	m.mu.Unlock()
+	if tag.RowsAffected() == 0 {
+		return m.Status(ctx, req.IdempotencyKey)
+	}
 
 	if outcome == OutcomeTimeout {
 		// The charge went through, but we "lose" the response: block until
@@ -96,9 +99,26 @@ func (m *MockProvider) Charge(ctx context.Context, req ChargeRequest) (Result, e
 	return res, nil
 }
 
-// Charges returns how many times money was actually taken (for tests).
-func (m *MockProvider) Charges() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.charges
+// Status implements Provider: what happened to the charge with this key?
+func (m *MockProvider) Status(ctx context.Context, idempotencyKey string) (Result, error) {
+	var res Result
+	err := m.db.QueryRow(ctx, `
+		SELECT status, COALESCE(reference, ''), COALESCE(failure_reason, '')
+		FROM mock_provider_charges WHERE idempotency_key = $1`, idempotencyKey).
+		Scan(&res.Status, &res.Reference, &res.FailureReason)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Result{}, ErrChargeNotFound
+	}
+	if err != nil {
+		return Result{}, fmt.Errorf("%w: %w", ErrProviderUnavailable, err)
+	}
+	return res, nil
+}
+
+// Charges returns how many times money was actually taken (for tests and
+// demos): the number of SUCCEEDED charges.
+func (m *MockProvider) Charges(ctx context.Context) (int, error) {
+	var n int
+	err := m.db.QueryRow(ctx, `SELECT count(*) FROM mock_provider_charges WHERE status = 'SUCCEEDED'`).Scan(&n)
+	return n, err
 }

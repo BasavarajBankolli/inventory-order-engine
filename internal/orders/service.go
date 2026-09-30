@@ -34,6 +34,7 @@ type Service struct {
 
 	reservationTTL time.Duration // how long stock is held for an unpaid order
 	paymentTimeout time.Duration // how long we wait for the payment provider
+	reconcileAfter time.Duration // grace period before the worker resolves PAYMENT_PENDING orders
 }
 
 // Deps lists what the orders Service needs. A struct keeps the constructor
@@ -47,6 +48,10 @@ type Deps struct {
 	Provider       payments.Provider
 	ReservationTTL time.Duration
 	PaymentTimeout time.Duration
+	// ReconcileAfter: how long after a reservation expired the worker waits
+	// before resolving a PAYMENT_PENDING order. Must be longer than
+	// PaymentTimeout, so that no charge can still be in flight.
+	ReconcileAfter time.Duration
 }
 
 // NewService creates an orders Service.
@@ -60,6 +65,7 @@ func NewService(d Deps) *Service {
 		provider:       d.Provider,
 		reservationTTL: d.ReservationTTL,
 		paymentTimeout: d.PaymentTimeout,
+		reconcileAfter: d.ReconcileAfter,
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -105,6 +106,48 @@ func (r *Repository) GetByIdempotencyKey(ctx context.Context, userID int64, key 
 
 	o.Items, err = r.items(ctx, o.ID)
 	return o, err
+}
+
+// OverdueReservedIDs returns up to limit RESERVED orders that have at least
+// one ACTIVE reservation past its expires_at (database clock). This is a
+// read-only join with inventory_reservations; it uses the partial index
+// on ACTIVE reservations' expires_at.
+func (r *Repository) OverdueReservedIDs(ctx context.Context, limit int) ([]int64, error) {
+	return r.ids(ctx, `
+		SELECT DISTINCT o.id
+		FROM orders o
+		JOIN inventory_reservations res ON res.order_id = o.id
+		WHERE o.status = 'RESERVED'
+		  AND res.status = 'ACTIVE'
+		  AND res.expires_at <= now()
+		ORDER BY o.id
+		LIMIT $1`, limit)
+}
+
+// OverduePaymentPendingIDs returns up to limit PAYMENT_PENDING orders whose
+// reservation expired more than grace ago.
+func (r *Repository) OverduePaymentPendingIDs(ctx context.Context, grace time.Duration, limit int) ([]int64, error) {
+	return r.ids(ctx, `
+		SELECT DISTINCT o.id
+		FROM orders o
+		JOIN inventory_reservations res ON res.order_id = o.id
+		WHERE o.status = 'PAYMENT_PENDING'
+		  AND res.status = 'ACTIVE'
+		  AND res.expires_at <= now() - make_interval(secs => $2)
+		ORDER BY o.id
+		LIMIT $1`, limit, grace.Seconds())
+}
+
+func (r *Repository) ids(ctx context.Context, sql string, args ...any) ([]int64, error) {
+	rows, err := r.db.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("select order ids: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return nil, fmt.Errorf("scan order ids: %w", err)
+	}
+	return ids, nil
 }
 
 // GetForUpdate reads an order (without items) and locks its row until the

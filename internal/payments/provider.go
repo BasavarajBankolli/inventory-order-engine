@@ -19,8 +19,14 @@ import (
 // such a key so that a RETRIED charge request (after a timeout) returns the
 // original result instead of charging the customer a second time. Without
 // it, "retry after timeout" could mean "charge twice".
+//
+// Status is a READ-ONLY lookup ("what happened to the charge with this
+// key?") that never takes money. The worker uses it to resolve payments
+// whose outcome was unknown (timeouts) - this is called reconciliation.
+// Real providers offer the same thing (e.g. retrieving a PaymentIntent).
 type Provider interface {
 	Charge(ctx context.Context, req ChargeRequest) (Result, error)
+	Status(ctx context.Context, idempotencyKey string) (Result, error)
 }
 
 // ChargeRequest describes one charge.
@@ -50,5 +56,11 @@ type Result struct {
 	FailureReason string // set when DECLINED, e.g. "card_declined"
 }
 
-// ErrProviderUnavailable wraps errors where the outcome is unknown.
-var ErrProviderUnavailable = errors.New("payment provider did not answer")
+var (
+	// ErrProviderUnavailable wraps errors where the outcome is unknown.
+	ErrProviderUnavailable = errors.New("payment provider did not answer")
+
+	// ErrChargeNotFound (from Status): the provider never received a charge
+	// with this key, so no money was taken.
+	ErrChargeNotFound = errors.New("provider has no charge with this key")
+)

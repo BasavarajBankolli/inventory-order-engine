@@ -32,7 +32,7 @@ type fixture struct {
 func setup(t *testing.T) fixture {
 	t.Helper()
 	pool := testutil.NewMigratedPool(t)
-	provider := payments.NewMockProvider(payments.OutcomeSuccess)
+	provider := payments.NewMockProvider(pool, payments.OutcomeSuccess)
 	f := fixture{
 		pool: pool,
 		svc: orders.NewService(orders.Deps{
@@ -44,6 +44,7 @@ func setup(t *testing.T) fixture {
 			Provider:       provider,
 			ReservationTTL: 15 * time.Minute,
 			PaymentTimeout: 200 * time.Millisecond,
+			ReconcileAfter: time.Second,
 		}),
 		provider: provider,
 	}

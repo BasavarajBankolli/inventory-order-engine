@@ -88,6 +88,16 @@ func (s *Service) Pay(ctx context.Context, caller identity.Principal, orderID in
 			return err
 
 		case StatusPaymentPending: // retry after a timeout: reuse the payment
+			// Once the hold has expired we no longer START charges; the
+			// worker resolves this order with a read-only provider lookup.
+			// This rule is what makes the worker's grace period safe.
+			expired, err := s.inventory.HasExpiredReservations(ctx, tx, o.ID)
+			if err != nil {
+				return err
+			}
+			if expired {
+				return ErrReservationExpired
+			}
 			pay, err = payRepo.GetByOrder(ctx, o.ID)
 			return err
 

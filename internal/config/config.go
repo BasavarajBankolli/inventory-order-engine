@@ -54,6 +54,17 @@ type Config struct {
 	// MockPaymentOutcome is the mock provider's default behaviour:
 	// SUCCESS, FAILURE or TIMEOUT.
 	MockPaymentOutcome string
+
+	// PaymentReconcileAfter is how long after a reservation expired the
+	// worker waits before resolving a PAYMENT_PENDING order with the
+	// provider. Must be longer than PaymentTimeout.
+	PaymentReconcileAfter time.Duration
+
+	// WorkerInterval is how often the worker runs its jobs.
+	WorkerInterval time.Duration
+
+	// WorkerBatchSize caps how many orders one job run handles.
+	WorkerBatchSize int
 }
 
 // minJWTSecretLen: HMAC-SHA256 keys shorter than 32 bytes (256 bits) are
@@ -64,16 +75,19 @@ const minJWTSecretLen = 32
 // It returns an error (instead of panicking) so main() decides what to do.
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:           getEnv("HTTP_ADDR", ":8080"),
-		DatabaseURL:        os.Getenv("DATABASE_URL"),
-		DBMaxConns:         10,
-		LogLevel:           slog.LevelInfo,
-		ShutdownTimeout:    10 * time.Second,
-		JWTSecret:          os.Getenv("JWT_SECRET"),
-		JWTTTL:             time.Hour,
-		ReservationTTL:     15 * time.Minute,
-		PaymentTimeout:     5 * time.Second,
-		MockPaymentOutcome: "SUCCESS",
+		HTTPAddr:              getEnv("HTTP_ADDR", ":8080"),
+		DatabaseURL:           os.Getenv("DATABASE_URL"),
+		DBMaxConns:            10,
+		LogLevel:              slog.LevelInfo,
+		ShutdownTimeout:       10 * time.Second,
+		JWTSecret:             os.Getenv("JWT_SECRET"),
+		JWTTTL:                time.Hour,
+		ReservationTTL:        15 * time.Minute,
+		PaymentTimeout:        5 * time.Second,
+		MockPaymentOutcome:    "SUCCESS",
+		PaymentReconcileAfter: time.Minute,
+		WorkerInterval:        10 * time.Second,
+		WorkerBatchSize:       100,
 	}
 
 	// Required values: there is no safe default for a database password.
@@ -127,6 +141,37 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("MOCK_PAYMENT_OUTCOME must be SUCCESS, FAILURE or TIMEOUT, got %q", v)
 		}
 		cfg.MockPaymentOutcome = v
+	}
+
+	if v := os.Getenv("PAYMENT_RECONCILE_AFTER"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("PAYMENT_RECONCILE_AFTER must be a positive duration like 1m, got %q", v)
+		}
+		cfg.PaymentReconcileAfter = d
+	}
+	// Safety rule, not just validation: if the worker resolved a payment
+	// while a charge could still be in flight, it might expire an order
+	// the customer is being charged for right now.
+	if cfg.PaymentReconcileAfter <= cfg.PaymentTimeout {
+		return Config{}, fmt.Errorf("PAYMENT_RECONCILE_AFTER (%s) must be longer than PAYMENT_TIMEOUT (%s)",
+			cfg.PaymentReconcileAfter, cfg.PaymentTimeout)
+	}
+
+	if v := os.Getenv("WORKER_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 100*time.Millisecond {
+			return Config{}, fmt.Errorf("WORKER_INTERVAL must be a duration of at least 100ms like 10s, got %q", v)
+		}
+		cfg.WorkerInterval = d
+	}
+
+	if v := os.Getenv("WORKER_BATCH_SIZE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 10000 {
+			return Config{}, fmt.Errorf("WORKER_BATCH_SIZE must be between 1 and 10000, got %q", v)
+		}
+		cfg.WorkerBatchSize = n
 	}
 
 	return cfg, nil

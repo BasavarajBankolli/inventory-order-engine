@@ -52,6 +52,12 @@ It's idempotent per key, like a real provider: the first request for a key decid
 and later ones get the same result without charging again. It counts real charges (`Charges()`)
 so tests can assert "charged exactly once".
 
+> **Updated in Stage 10:** the mock keeps its charges in its own table, `mock_provider_charges`
+> (migration 000009), instead of in memory. A real provider keeps records on *its* servers, which
+> every client can query. The API and the worker are separate processes, and both must see the
+> same charges, so the worker can ask "did that timed-out charge go through?" through
+> `Provider.Status`. An in-memory map inside the API process can't do that.
+
 Choose the outcome with:
 - `MOCK_PAYMENT_OUTCOME` (default `SUCCESS`), or
 - per request: `POST /orders/{id}/pay` with body `{"simulate": "FAILURE"}`. This goes through the context as a clearly marked test hook, and a real provider would ignore it.
