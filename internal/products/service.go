@@ -7,22 +7,29 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"inventory-order-engine/internal/database"
+	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/validate"
 )
 
 // Service holds the product business rules: normalising and validating
 // input, and deciding what "delete" means (archive, not remove).
 //
-// It depends on the concrete *Repository. Unlike auth, there is no fake
+// It depends on the concrete repositories. Unlike auth, there is no fake
 // store here: the rules are plain functions (validateCreate, ...) that are
 // unit-tested directly, and the SQL is tested against real PostgreSQL.
 type Service struct {
-	repo *Repository
+	pool      *pgxpool.Pool // to start transactions
+	repo      *Repository
+	inventory *inventory.Repository
 }
 
 // NewService creates a products Service.
-func NewService(repo *Repository) *Service {
-	return &Service{repo: repo}
+func NewService(pool *pgxpool.Pool, repo *Repository, inv *inventory.Repository) *Service {
+	return &Service{pool: pool, repo: repo, inventory: inv}
 }
 
 // CreateInput is the data needed to create a product.
@@ -62,17 +69,32 @@ type ListResult struct {
 	Offset int       `json:"offset"`
 }
 
-// Create validates and stores a new product.
+// Create validates and stores a new product together with its (empty)
+// inventory row.
+//
+// Both INSERTs run in ONE transaction: if the inventory insert failed after
+// the product insert succeeded, the product is rolled back too. There is
+// never a product without an inventory row (which Stage 5 relies on when it
+// locks inventory rows to place orders).
 func (s *Service) Create(ctx context.Context, in CreateInput) (Product, error) {
 	in = normalizeCreate(in)
 	if err := validateCreate(in); err != nil {
 		return Product{}, err
 	}
 
-	p, err := s.repo.Create(ctx, in)
+	var p Product
+	err := database.WithTx(ctx, s.pool, func(tx pgx.Tx) error {
+		var err error
+		p, err = s.repo.WithTx(tx).Create(ctx, in)
+		if err != nil {
+			return err // may be ErrSKUTaken
+		}
+		return s.inventory.WithTx(tx).CreateForProduct(ctx, p.ID)
+	})
 	if err != nil {
-		return Product{}, err // may be ErrSKUTaken
+		return Product{}, err
 	}
+
 	slog.InfoContext(ctx, "product created", "product_id", p.ID, "sku", p.SKU)
 	return p, nil
 }

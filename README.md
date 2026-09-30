@@ -6,7 +6,7 @@ It is built to handle concurrent orders correctly and **never oversell stock**.
 This is a learning and portfolio project, so the code favours clarity over cleverness.
 Each module has a matching explanation in [`docs/learning/`](docs/learning/).
 
-> **Status: Stage 3 of 15 — skeleton, authentication, product catalogue.**
+> **Status: Stage 4 of 15 — skeleton, authentication, products, inventory.**
 > This README grows with each stage.
 
 ---
@@ -37,6 +37,7 @@ flowchart LR
     router --> pubp[/GET products/]
     router --> ra[RequireAuth] --> me[/users/me/]
     ra --> rr[RequireRole ADMIN] --> adm[/POST, PATCH, DELETE products/]
+    rr --> inv[/GET, PATCH products/id/inventory/]
 ```
 
 Handlers stay thin. Business rules live in services, and SQL lives in repositories:
@@ -44,7 +45,8 @@ Handlers stay thin. Business rules live in services, and SQL lives in repositori
 ```text
 HTTP handler      ->  service (rules)   ->  repository (SQL)    ->  PostgreSQL
 auth.Handler          auth.Service          users.Repository
-products.Handler      products.Service      products.Repository
+products.Handler      products.Service      products.Repository (+ inventory.Repository, one transaction)
+inventory.Handler     inventory.Service     inventory.Repository   (SELECT ... FOR UPDATE)
 ```
 
 ### Folder layout
@@ -57,8 +59,9 @@ internal/
   app/                 Builds every module and connects them (used by main and API tests)
   auth/                Register/login service, bcrypt, JWT, RequireAuth/RequireRole middleware
   config/              Reads settings from environment variables
-  database/            PostgreSQL pool + migration runner
+  database/            PostgreSQL pool, migration runner, WithTx transaction helper
   health/              /health (liveness) and /ready (readiness)
+  inventory/           Stock levels: domain rules, row locking, optimistic versioning
   httpx/               Shared JSON helpers: strict body decoding, response and error helpers
   identity/            Principal (user id + role) of the authenticated caller, in context
   logging/             Structured JSON logger (log/slog) that adds request_id automatically
@@ -75,7 +78,7 @@ docs/learning/         Beginner-friendly explanations for every module
 tests/                 End-to-end API tests (HTTP -> router -> services -> PostgreSQL)
 ```
 
-Packages such as `inventory/`, `orders/`, `payments/`, `events/`, `worker/`,
+Packages such as `orders/`, `payments/`, `events/`, `worker/`,
 and `cache/` are added in later stages. There is no `pkg/` folder, because
 nothing here is meant to be imported by other projects.
 
@@ -183,7 +186,8 @@ time the Postgres volume is initialised. Every integration test gets its own tem
 
 All business endpoints are under `/api/v1`. Request and response details are in
 [docs/learning/02-authentication.md](docs/learning/02-authentication.md) and
-[docs/learning/03-products.md](docs/learning/03-products.md). A complete API
+[docs/learning/03-products.md](docs/learning/03-products.md) and
+[docs/learning/04-inventory.md](docs/learning/04-inventory.md). A complete API
 reference is added in Stage 15.
 
 | Method | URL | Auth | Description | Errors |
@@ -198,6 +202,8 @@ reference is added in Stage 15.
 | POST | `/api/v1/products` | Admin | Create a product | 400, 401, 403, 409 `SKU_ALREADY_EXISTS` |
 | PATCH | `/api/v1/products/{id}` | Admin | Partial update (SKU cannot change) | 400, 401, 403, 404 |
 | DELETE | `/api/v1/products/{id}` | Admin | Archive (soft delete), returns 204 | 400, 401, 403, 404 |
+| GET | `/api/v1/products/{id}/inventory` | Admin | Stock: `available_quantity`, `reserved_quantity`, `version` | 400, 401, 403, 404 |
+| PATCH | `/api/v1/products/{id}/inventory` | Admin | `{"adjustment": 25}` or `{"available_quantity": 100, "version": 3}` | 400, 404, 409 `INSUFFICIENT_STOCK` / `VERSION_CONFLICT` |
 
 **Money:** `price` is an integer in **minor units** (paise or cents). `"price": 129900, "currency": "INR"`
 means ₹1,299.00. Floats are never used for money.
@@ -236,6 +242,11 @@ Invoke-RestMethod -Method Post -Uri "$base/products" -Headers $headers -ContentT
 Invoke-RestMethod -Uri "$base/products?q=mouse&sort=price_asc&limit=10"
 Invoke-RestMethod -Method Patch -Uri "$base/products/1" -Headers $headers -ContentType "application/json" -Body '{"price": 99900}'
 Invoke-WebRequest -Method Delete -Uri "$base/products/1" -Headers $headers -UseBasicParsing   # 204
+
+# 5. Inventory (admin): every product starts with 0 available
+Invoke-RestMethod -Uri "$base/products/2/inventory" -Headers $headers
+Invoke-RestMethod -Method Patch -Uri "$base/products/2/inventory" -Headers $headers -ContentType "application/json" -Body '{"adjustment": 50}'
+Invoke-RestMethod -Method Patch -Uri "$base/products/2/inventory" -Headers $headers -ContentType "application/json" -Body '{"available_quantity": 45, "version": 2}'
 ```
 
 > In Windows PowerShell, `curl` is an alias for `Invoke-WebRequest`. If you use real curl, type
@@ -259,7 +270,7 @@ docker compose exec postgres psql -U app -d inventory -c "UPDATE users SET role 
 1. ✅ Project setup, Docker, PostgreSQL
 2. ✅ Authentication (register, login, JWT, roles)
 3. ✅ Products
-4. Inventory
+4. ✅ Inventory
 5. Orders
 6. Inventory reservations
 7. Transactions and concurrency (100 concurrent buyers, 1 item in stock)

@@ -15,19 +15,21 @@ import (
 	"inventory-order-engine/internal/health"
 	"inventory-order-engine/internal/httpx"
 	"inventory-order-engine/internal/identity"
+	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/middleware"
 	"inventory-order-engine/internal/products"
 	"inventory-order-engine/internal/users"
 )
 
-// Deps lists everything the router needs. New modules (inventory, orders,
-// ...) add their handlers here in later stages.
+// Deps lists everything the router needs. New modules (orders, ...) add
+// their handlers here in later stages.
 type Deps struct {
-	Logger   *slog.Logger
-	Health   *health.Handler
-	Auth     *auth.Handler
-	Users    *users.Handler
-	Products *products.Handler
+	Logger    *slog.Logger
+	Health    *health.Handler
+	Auth      *auth.Handler
+	Users     *users.Handler
+	Products  *products.Handler
+	Inventory *inventory.Handler
 
 	// RequireAuth is the middleware that rejects requests without a valid
 	// access token.
@@ -76,6 +78,9 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/products", d.Products.Create)
 				r.Patch("/products/{id}", d.Products.Update)
 				r.Delete("/products/{id}", d.Products.Delete)
+
+				r.Get("/products/{id}/inventory", d.Inventory.Get)
+				r.Patch("/products/{id}/inventory", d.Inventory.Update)
 			})
 		})
 	})

@@ -7,19 +7,24 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"inventory-order-engine/internal/database"
 )
 
 // Repository contains all SQL for the products table.
 type Repository struct {
-	pool *pgxpool.Pool
+	db database.DBTX
 }
 
-// NewRepository creates a products Repository.
-func NewRepository(pool *pgxpool.Pool) *Repository {
-	return &Repository{pool: pool}
+// NewRepository creates a products Repository that runs queries on db
+// (normally the connection pool).
+func NewRepository(db database.DBTX) *Repository {
+	return &Repository{db: db}
+}
+
+// WithTx returns a copy of the repository whose queries run inside tx.
+func (r *Repository) WithTx(tx pgx.Tx) *Repository {
+	return &Repository{db: tx}
 }
 
 const productColumns = `id, sku, name, description, price, currency, status, created_at, updated_at`
@@ -47,7 +52,7 @@ var sortOrders = map[string]string{
 
 // Create inserts a product. Returns ErrSKUTaken if the SKU exists.
 func (r *Repository) Create(ctx context.Context, in CreateInput) (Product, error) {
-	row := r.pool.QueryRow(ctx, `
+	row := r.db.QueryRow(ctx, `
 		INSERT INTO products (sku, name, description, price, currency, status)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING `+productColumns,
@@ -65,7 +70,7 @@ func (r *Repository) Create(ctx context.Context, in CreateInput) (Product, error
 
 // GetByID returns a non-archived product.
 func (r *Repository) GetByID(ctx context.Context, id int64) (Product, error) {
-	row := r.pool.QueryRow(ctx, `
+	row := r.db.QueryRow(ctx, `
 		SELECT `+productColumns+`
 		FROM products
 		WHERE id = $1 AND status <> 'ARCHIVED'`, id)
@@ -90,7 +95,7 @@ func (r *Repository) List(ctx context.Context, p ListParams) ([]Product, int64, 
 
 	// Query 1: total count, so clients can show "page 2 of 7".
 	var total int64
-	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM products WHERE `+whereSQL, args...).Scan(&total); err != nil {
+	if err := r.db.QueryRow(ctx, `SELECT count(*) FROM products WHERE `+whereSQL, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count products: %w", err)
 	}
 
@@ -100,7 +105,7 @@ func (r *Repository) List(ctx context.Context, p ListParams) ([]Product, int64, 
 	query := fmt.Sprintf(`SELECT %s FROM products WHERE %s ORDER BY %s LIMIT $%d OFFSET $%d`,
 		productColumns, whereSQL, orderBy, len(args)-1, len(args))
 
-	rows, err := r.pool.Query(ctx, query, args...)
+	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list products: %w", err)
 	}
@@ -120,7 +125,7 @@ func (r *Repository) List(ctx context.Context, p ListParams) ([]Product, int64, 
 // did not send stay unchanged, and ONE fixed SQL statement handles every
 // combination of fields.
 func (r *Repository) Update(ctx context.Context, id int64, in UpdateInput) (Product, error) {
-	row := r.pool.QueryRow(ctx, `
+	row := r.db.QueryRow(ctx, `
 		UPDATE products SET
 			name        = COALESCE($2, name),
 			description = COALESCE($3, description),
@@ -138,7 +143,7 @@ func (r *Repository) Update(ctx context.Context, id int64, in UpdateInput) (Prod
 // Archive soft-deletes a product. Archiving twice returns ErrNotFound the
 // second time, because an archived product no longer "exists" for the API.
 func (r *Repository) Archive(ctx context.Context, id int64) error {
-	tag, err := r.pool.Exec(ctx, `
+	tag, err := r.db.Exec(ctx, `
 		UPDATE products SET status = 'ARCHIVED', updated_at = now()
 		WHERE id = $1 AND status <> 'ARCHIVED'`, id)
 	if err != nil {

@@ -25,6 +25,8 @@ const (
 	CodeMethodNotAllowed   = "METHOD_NOT_ALLOWED"
 	CodeEmailTaken         = "EMAIL_ALREADY_EXISTS"
 	CodeSKUTaken           = "SKU_ALREADY_EXISTS"
+	CodeInsufficientStock  = "INSUFFICIENT_STOCK"
+	CodeVersionConflict    = "VERSION_CONFLICT"
 	CodeInternal           = "INTERNAL_ERROR"
 )
 
