@@ -1,0 +1,15 @@
+# Local environment overrides (may contain secrets)
+.env
+
+# Build output
+/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

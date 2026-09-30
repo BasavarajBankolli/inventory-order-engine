@@ -1,0 +1,11 @@
+-- 000001_init.sql
+-- Baseline migration: database-wide setup needed by later migrations.
+--
+-- citext = "case-insensitive text". Stage 2 stores users.email as CITEXT so
+-- that 'Alice@Example.com' and 'alice@example.com' are the SAME value for
+-- comparisons and for the UNIQUE constraint. Without it, two accounts could
+-- be registered for one real mailbox.
+--
+-- citext ships with PostgreSQL (it is a "contrib" extension); nothing extra
+-- has to be installed.
+CREATE EXTENSION IF NOT EXISTS citext;
