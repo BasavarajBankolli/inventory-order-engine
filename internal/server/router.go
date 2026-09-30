@@ -78,6 +78,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/orders", d.Orders.List)
 			r.Get("/orders/{id}", d.Orders.Get)
 			r.Post("/orders/{id}/cancel", d.Orders.Cancel)
+			r.Post("/orders/{id}/pay", d.Orders.Pay)
 
 			// Admin only: RequireRole runs after RequireAuth, so it can
 			// read the caller's role from the context.

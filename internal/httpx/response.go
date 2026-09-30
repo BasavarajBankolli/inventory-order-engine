@@ -30,6 +30,9 @@ const (
 	CodeProductUnavailable   = "PRODUCT_UNAVAILABLE"
 	CodeOutOfStock           = "OUT_OF_STOCK"
 	CodeIdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED"
+	CodePaymentFailed        = "PAYMENT_FAILED"
+	CodePaymentTimeout       = "PAYMENT_TIMEOUT"
+	CodeReservationExpired   = "RESERVATION_EXPIRED"
 	CodeInvalidTransition    = "INVALID_STATE_TRANSITION"
 	CodeInternal             = "INTERNAL_ERROR"
 )

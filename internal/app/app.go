@@ -17,6 +17,7 @@ import (
 	"inventory-order-engine/internal/health"
 	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/orders"
+	"inventory-order-engine/internal/payments"
 	"inventory-order-engine/internal/products"
 	"inventory-order-engine/internal/server"
 	"inventory-order-engine/internal/users"
@@ -49,7 +50,19 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts
 	}
 	productService := products.NewService(pool, productRepo, inventoryRepo)
 	inventoryService := inventory.NewService(pool, inventoryRepo)
-	orderService := orders.NewService(pool, orderRepo, productRepo, inventoryService, cfg.ReservationTTL)
+	// The only provider implementation is the mock. A real one (Stripe,
+	// Razorpay, ...) would be chosen here from configuration.
+	outcome, _ := payments.ParseOutcome(cfg.MockPaymentOutcome) // validated by config
+	orderService := orders.NewService(orders.Deps{
+		Pool:           pool,
+		Orders:         orderRepo,
+		Products:       productRepo,
+		Inventory:      inventoryService,
+		Payments:       payments.NewRepository(pool),
+		Provider:       payments.NewMockProvider(outcome),
+		ReservationTTL: cfg.ReservationTTL,
+		PaymentTimeout: cfg.PaymentTimeout,
+	})
 
 	// Handlers (HTTP)
 	return server.NewRouter(server.Deps{

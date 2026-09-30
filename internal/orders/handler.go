@@ -8,6 +8,7 @@ import (
 	"inventory-order-engine/internal/httpx"
 	"inventory-order-engine/internal/identity"
 	"inventory-order-engine/internal/inventory"
+	"inventory-order-engine/internal/payments"
 	"inventory-order-engine/internal/validate"
 )
 
@@ -141,6 +142,58 @@ func (h *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, r, http.StatusOK, o)
 }
 
+type payRequest struct {
+	// Simulate asks the MOCK payment provider for a specific outcome:
+	// "SUCCESS", "FAILURE" or "TIMEOUT". Testing/demo only; a real provider
+	// would ignore it.
+	Simulate string `json:"simulate"`
+}
+
+// Pay handles POST /api/v1/orders/{id}/pay
+//
+//	(empty body)                    use the mock's default outcome
+//	{"simulate": "FAILURE"}         force a decline
+//	{"simulate": "TIMEOUT"}         charge succeeds but the answer is lost
+//
+// 200 = paid (order CONFIRMED). 402 = declined (order CANCELLED, stock
+// released). 504 = no answer from the provider (order still
+// PAYMENT_PENDING; call this endpoint again - it will not charge twice).
+func (h *Handler) Pay(w http.ResponseWriter, r *http.Request) {
+	caller, ok := callerFrom(w, r)
+	if !ok {
+		return
+	}
+	id, ok := httpx.PathID(r, "id")
+	if !ok {
+		httpx.WriteValidationError(w, r, validate.Errors{"id": "must be a positive integer"})
+		return
+	}
+
+	ctx := r.Context()
+	if r.ContentLength != 0 { // the body is optional
+		var req payRequest
+		if err := httpx.DecodeJSON(w, r, &req); err != nil {
+			httpx.WriteError(w, r, http.StatusBadRequest, httpx.CodeValidation, err.Error())
+			return
+		}
+		if req.Simulate != "" {
+			outcome, ok := payments.ParseOutcome(req.Simulate)
+			if !ok {
+				httpx.WriteValidationError(w, r, validate.Errors{"simulate": "must be SUCCESS, FAILURE or TIMEOUT"})
+				return
+			}
+			ctx = payments.WithSimulatedOutcome(ctx, outcome)
+		}
+	}
+
+	res, err := h.svc.Pay(ctx, caller, id)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, r, http.StatusOK, res)
+}
+
 func callerFrom(w http.ResponseWriter, r *http.Request) (identity.Principal, bool) {
 	p, ok := identity.FromContext(r.Context())
 	if !ok {
@@ -166,6 +219,16 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, ErrIdempotencyKeyReused):
 		httpx.WriteError(w, r, http.StatusConflict, httpx.CodeIdempotencyKeyReused,
 			"this Idempotency-Key was already used for a different request; use a new key for a new order")
+	case errors.Is(err, ErrPaymentDeclined):
+		httpx.WriteError(w, r, http.StatusPaymentRequired, httpx.CodePaymentFailed,
+			err.Error()+"; the order was cancelled and its stock released")
+	case errors.Is(err, ErrPaymentOutcomeUnknown):
+		httpx.WriteError(w, r, http.StatusGatewayTimeout, httpx.CodePaymentTimeout,
+			"the payment provider did not answer in time; the order is still PAYMENT_PENDING. "+
+				"Retry this request - you will not be charged twice")
+	case errors.Is(err, ErrReservationExpired):
+		httpx.WriteError(w, r, http.StatusConflict, httpx.CodeReservationExpired,
+			"the stock reservation for this order has expired; please place a new order")
 	case errors.Is(err, ErrInvalidTransition):
 		httpx.WriteError(w, r, http.StatusConflict, httpx.CodeInvalidTransition, err.Error())
 	default:

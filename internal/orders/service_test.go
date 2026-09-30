@@ -12,6 +12,7 @@ import (
 	"inventory-order-engine/internal/identity"
 	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/orders"
+	"inventory-order-engine/internal/payments"
 	"inventory-order-engine/internal/products"
 	"inventory-order-engine/internal/testutil"
 	"inventory-order-engine/internal/validate"
@@ -20,20 +21,31 @@ import (
 // Integration tests against real PostgreSQL (skipped without TEST_DATABASE_URL).
 
 type fixture struct {
-	pool  *pgxpool.Pool
-	svc   *orders.Service
-	alice identity.Principal // customer
-	bob   identity.Principal // customer
-	admin identity.Principal
+	pool     *pgxpool.Pool
+	svc      *orders.Service
+	provider *payments.MockProvider
+	alice    identity.Principal // customer
+	bob      identity.Principal // customer
+	admin    identity.Principal
 }
 
 func setup(t *testing.T) fixture {
 	t.Helper()
 	pool := testutil.NewMigratedPool(t)
+	provider := payments.NewMockProvider(payments.OutcomeSuccess)
 	f := fixture{
 		pool: pool,
-		svc: orders.NewService(pool, orders.NewRepository(pool), products.NewRepository(pool),
-			inventory.NewService(pool, inventory.NewRepository(pool)), 15*time.Minute),
+		svc: orders.NewService(orders.Deps{
+			Pool:           pool,
+			Orders:         orders.NewRepository(pool),
+			Products:       products.NewRepository(pool),
+			Inventory:      inventory.NewService(pool, inventory.NewRepository(pool)),
+			Payments:       payments.NewRepository(pool),
+			Provider:       provider,
+			ReservationTTL: 15 * time.Minute,
+			PaymentTimeout: 200 * time.Millisecond,
+		}),
+		provider: provider,
 	}
 	f.alice = identity.Principal{UserID: f.user(t, "alice@x.com"), Role: identity.RoleCustomer}
 	f.bob = identity.Principal{UserID: f.user(t, "bob@x.com"), Role: identity.RoleCustomer}

@@ -152,9 +152,31 @@ func (s *Service) ReleaseForOrder(ctx context.Context, tx pgx.Tx, orderID int64,
 	if to != ReservationReleased && to != ReservationExpired {
 		return 0, fmt.Errorf("release: invalid target status %s", to)
 	}
+	return s.finishReservations(ctx, tx, orderID, to, (*Inventory).ReleaseReserved)
+}
 
+// ConfirmForOrder turns all ACTIVE reservations of a paid order into sales:
+// reserved -= qty (available is untouched - those units were already taken
+// out of it at reservation time) and the reservations become CONFIRMED.
+// Idempotent in the same way as ReleaseForOrder.
+func (s *Service) ConfirmForOrder(ctx context.Context, tx pgx.Tx, orderID int64) (int, error) {
+	return s.finishReservations(ctx, tx, orderID, ReservationConfirmed, (*Inventory).ConfirmReserved)
+}
+
+// HasExpiredReservations reports whether the order's stock hold has run
+// out. Payment refuses such orders: the stock may be about to go back on
+// sale (Stage 10 worker), so it must not be sold to this order any more.
+func (s *Service) HasExpiredReservations(ctx context.Context, tx pgx.Tx, orderID int64) (bool, error) {
+	return s.repo.WithTx(tx).HasExpiredActive(ctx, orderID)
+}
+
+// finishReservations is the shared loop behind Release and Confirm: lock the
+// order's ACTIVE reservations (sorted by product id = global lock order),
+// apply the stock movement to each product row, and finish each reservation.
+func (s *Service) finishReservations(ctx context.Context, tx pgx.Tx, orderID int64, to ReservationStatus,
+	apply func(inv *Inventory, qty int) error) (int, error) {
 	repo := s.repo.WithTx(tx)
-	active, err := repo.ActiveReservationsForUpdate(ctx, orderID) // sorted by product id
+	active, err := repo.ActiveReservationsForUpdate(ctx, orderID)
 	if err != nil {
 		return 0, err
 	}
@@ -163,7 +185,7 @@ func (s *Service) ReleaseForOrder(ctx context.Context, tx pgx.Tx, orderID int64,
 		if err != nil {
 			return 0, err
 		}
-		if err := inv.ReleaseReserved(res.Quantity); err != nil {
+		if err := apply(&inv, res.Quantity); err != nil {
 			return 0, err
 		}
 		if _, err := repo.Save(ctx, inv); err != nil {

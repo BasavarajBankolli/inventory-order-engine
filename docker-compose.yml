@@ -53,6 +53,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:-local-dev-only-jwt-secret-change-me-0123456789}
       JWT_TTL: ${JWT_TTL:-1h}
       RESERVATION_TTL: ${RESERVATION_TTL:-15m}
+      PAYMENT_TIMEOUT: ${PAYMENT_TIMEOUT:-5s}
+      MOCK_PAYMENT_OUTCOME: ${MOCK_PAYMENT_OUTCOME:-SUCCESS}
     ports:
       - "${API_PORT:-8080}:8080"
     depends_on:

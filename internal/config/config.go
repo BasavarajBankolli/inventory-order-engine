@@ -46,6 +46,14 @@ type Config struct {
 	// ReservationTTL is how long stock stays reserved for an unpaid order
 	// before the expiry worker (Stage 10) may release it.
 	ReservationTTL time.Duration
+
+	// PaymentTimeout is how long we wait for the payment provider before
+	// treating the outcome as unknown.
+	PaymentTimeout time.Duration
+
+	// MockPaymentOutcome is the mock provider's default behaviour:
+	// SUCCESS, FAILURE or TIMEOUT.
+	MockPaymentOutcome string
 }
 
 // minJWTSecretLen: HMAC-SHA256 keys shorter than 32 bytes (256 bits) are
@@ -56,14 +64,16 @@ const minJWTSecretLen = 32
 // It returns an error (instead of panicking) so main() decides what to do.
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:        getEnv("HTTP_ADDR", ":8080"),
-		DatabaseURL:     os.Getenv("DATABASE_URL"),
-		DBMaxConns:      10,
-		LogLevel:        slog.LevelInfo,
-		ShutdownTimeout: 10 * time.Second,
-		JWTSecret:       os.Getenv("JWT_SECRET"),
-		JWTTTL:          time.Hour,
-		ReservationTTL:  15 * time.Minute,
+		HTTPAddr:           getEnv("HTTP_ADDR", ":8080"),
+		DatabaseURL:        os.Getenv("DATABASE_URL"),
+		DBMaxConns:         10,
+		LogLevel:           slog.LevelInfo,
+		ShutdownTimeout:    10 * time.Second,
+		JWTSecret:          os.Getenv("JWT_SECRET"),
+		JWTTTL:             time.Hour,
+		ReservationTTL:     15 * time.Minute,
+		PaymentTimeout:     5 * time.Second,
+		MockPaymentOutcome: "SUCCESS",
 	}
 
 	// Required values: there is no safe default for a database password.
@@ -101,6 +111,22 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("RESERVATION_TTL must be a duration of at least 1s like 15m, got %q", v)
 		}
 		cfg.ReservationTTL = d
+	}
+
+	if v := os.Getenv("PAYMENT_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("PAYMENT_TIMEOUT must be a positive duration like 5s, got %q", v)
+		}
+		cfg.PaymentTimeout = d
+	}
+
+	if v := os.Getenv("MOCK_PAYMENT_OUTCOME"); v != "" {
+		v = strings.ToUpper(v)
+		if v != "SUCCESS" && v != "FAILURE" && v != "TIMEOUT" {
+			return Config{}, fmt.Errorf("MOCK_PAYMENT_OUTCOME must be SUCCESS, FAILURE or TIMEOUT, got %q", v)
+		}
+		cfg.MockPaymentOutcome = v
 	}
 
 	return cfg, nil

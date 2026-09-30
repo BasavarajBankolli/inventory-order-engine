@@ -68,6 +68,21 @@ func (r *Repository) ActiveReservationsForUpdate(ctx context.Context, orderID in
 	return list, nil
 }
 
+// HasExpiredActive reports whether any ACTIVE reservation of the order has
+// passed its expires_at (compared with the database clock).
+func (r *Repository) HasExpiredActive(ctx context.Context, orderID int64) (bool, error) {
+	var expired bool
+	err := r.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM inventory_reservations
+			WHERE order_id = $1 AND status = 'ACTIVE' AND expires_at <= now()
+		)`, orderID).Scan(&expired)
+	if err != nil {
+		return false, fmt.Errorf("check expired reservations: %w", err)
+	}
+	return expired, nil
+}
+
 // FinishReservation moves one ACTIVE reservation to a final status.
 // "AND status = 'ACTIVE'" guarantees a reservation is finished at most once.
 func (r *Repository) FinishReservation(ctx context.Context, id int64, to ReservationStatus) error {

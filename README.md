@@ -6,7 +6,7 @@ It is built to handle concurrent orders correctly and **never oversell stock**.
 This is a learning and portfolio project, so the code favours clarity over cleverness.
 Each module has a matching explanation in [`docs/learning/`](docs/learning/).
 
-> **Status: Stage 8 of 15 — orders with stock reservations, safe under concurrency, idempotent retries.**
+> **Status: Stage 9 of 15 — orders, reservations, concurrency, idempotency, mock payments.**
 > This README grows with each stage.
 
 ---
@@ -102,6 +102,23 @@ go run ./cmd/concurrency-demo -mode idempotency -buyers 50   # 1 x 201, 49 x 200
 
 Details: [docs/learning/08-idempotency.md](docs/learning/08-idempotency.md).
 
+### Payments (mock provider)
+
+```mermaid
+stateDiagram-v2
+    [*] --> RESERVED: POST /orders
+    RESERVED --> PAYMENT_PENDING: POST /orders/{id}/pay (step 1)
+    PAYMENT_PENDING --> CONFIRMED: provider SUCCEEDED (reserved stock sold)
+    PAYMENT_PENDING --> PAYMENT_FAILED: provider DECLINED
+    PAYMENT_FAILED --> CANCELLED: stock released
+    PAYMENT_PENDING --> PAYMENT_PENDING: timeout, outcome unknown (504, retry is safe)
+    RESERVED --> CANCELLED: POST /orders/{id}/cancel
+```
+
+The provider is called **outside** any transaction (no locks held during the slow call). The
+same provider idempotency key is used on every retry, so a timeout followed by a retry never
+charges twice. Details: [docs/learning/09-payments.md](docs/learning/09-payments.md).
+
 ### Folder layout
 
 ```text
@@ -120,7 +137,9 @@ internal/
   identity/            Principal (user id + role) of the authenticated caller, in context
   logging/             Structured JSON logger (log/slog) that adds request_id automatically
   middleware/          RequestID, Logger, Recoverer
-  orders/              Orders + items, price snapshot, totals, state machine, ownership, cancel
+  money/               Money type (integer minor units + currency)
+  orders/              Orders + items, price snapshot, totals, state machine, ownership, cancel, pay
+  payments/            Provider interface, mock provider, payments repository
   products/            Product catalogue: validation, soft delete, list/search/sort/paginate
   requestid/           Stores and reads the request ID in context.Context
   server/              Router: maps URLs to handlers
@@ -133,7 +152,7 @@ docs/learning/         Beginner-friendly explanations for every module
 tests/                 End-to-end API tests (HTTP -> router -> services -> PostgreSQL)
 ```
 
-Packages such as `payments/`, `events/`, `worker/`,
+Packages such as `events/`, `worker/`,
 and `cache/` are added in later stages. There is no `pkg/` folder, because
 nothing here is meant to be imported by other projects.
 
@@ -263,6 +282,7 @@ reference is added in Stage 15.
 | POST | `/api/v1/orders` | Bearer | `{"items":[{"product_id":2,"quantity":3}]}` reserves stock and returns a `RESERVED` order (201). Optional `Idempotency-Key` header: a repeat returns the original order (200) | 400, 401, 409 `OUT_OF_STOCK` / `PRODUCT_UNAVAILABLE` / `IDEMPOTENCY_KEY_REUSED` |
 | GET | `/api/v1/orders` | Bearer | Your orders (admins see all): `status`, `limit`, `offset` | 400, 401 |
 | GET | `/api/v1/orders/{id}` | Bearer | One order with items. Someone else's order returns 404 | 400, 401, 404 |
+| POST | `/api/v1/orders/{id}/pay` | Bearer | Pay a `RESERVED` order. Optional body `{"simulate":"SUCCESS"\|"FAILURE"\|"TIMEOUT"}` (mock only). Returns `{order, payment}` | 402 `PAYMENT_FAILED`, 504 `PAYMENT_TIMEOUT`, 409 `RESERVATION_EXPIRED` / `INVALID_STATE_TRANSITION`, 404 |
 | POST | `/api/v1/orders/{id}/cancel` | Bearer | Cancel if the state machine allows it; reserved stock goes back to available | 404, 409 `INVALID_STATE_TRANSITION` |
 | PATCH | `/api/v1/products/{id}/inventory` | Admin | `{"adjustment": 25}` or `{"available_quantity": 100, "version": 3}` | 400, 404, 409 `INSUFFICIENT_STOCK` / `VERSION_CONFLICT` |
 
@@ -342,7 +362,7 @@ docker compose exec postgres psql -U app -d inventory -c "UPDATE users SET role 
 6. ✅ Inventory reservations
 7. ✅ Transactions and concurrency (100 concurrent buyers, 1 item in stock)
 8. ✅ Idempotency keys
-9. Mock payments
+9. ✅ Mock payments
 10. Background workers (reservation expiry)
 11. Redis (cache and rate limiting)
 12. Transactional outbox

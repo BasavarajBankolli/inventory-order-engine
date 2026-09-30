@@ -13,6 +13,7 @@ import (
 	"inventory-order-engine/internal/database"
 	"inventory-order-engine/internal/identity"
 	"inventory-order-engine/internal/inventory"
+	"inventory-order-engine/internal/payments"
 	"inventory-order-engine/internal/products"
 	"inventory-order-engine/internal/validate"
 )
@@ -28,15 +29,38 @@ type Service struct {
 	orders    *Repository
 	products  *products.Repository
 	inventory *inventory.Service
+	payments  *payments.Repository
+	provider  payments.Provider
 
-	// reservationTTL is how long reserved stock is held for an unpaid order.
-	reservationTTL time.Duration
+	reservationTTL time.Duration // how long stock is held for an unpaid order
+	paymentTimeout time.Duration // how long we wait for the payment provider
+}
+
+// Deps lists what the orders Service needs. A struct keeps the constructor
+// readable now that there are many dependencies.
+type Deps struct {
+	Pool           *pgxpool.Pool
+	Orders         *Repository
+	Products       *products.Repository
+	Inventory      *inventory.Service
+	Payments       *payments.Repository
+	Provider       payments.Provider
+	ReservationTTL time.Duration
+	PaymentTimeout time.Duration
 }
 
 // NewService creates an orders Service.
-func NewService(pool *pgxpool.Pool, orders *Repository, prods *products.Repository,
-	inv *inventory.Service, reservationTTL time.Duration) *Service {
-	return &Service{pool: pool, orders: orders, products: prods, inventory: inv, reservationTTL: reservationTTL}
+func NewService(d Deps) *Service {
+	return &Service{
+		pool:           d.Pool,
+		orders:         d.Orders,
+		products:       d.Products,
+		inventory:      d.Inventory,
+		payments:       d.Payments,
+		provider:       d.Provider,
+		reservationTTL: d.ReservationTTL,
+		paymentTimeout: d.PaymentTimeout,
+	}
 }
 
 // Create places an order without an idempotency key.
