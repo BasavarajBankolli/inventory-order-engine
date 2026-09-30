@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"inventory-order-engine/internal/app"
+	"inventory-order-engine/internal/cache"
 	"inventory-order-engine/internal/config"
 	"inventory-order-engine/internal/database"
 	"inventory-order-engine/internal/logging"
@@ -53,7 +54,27 @@ func run() error {
 	defer pool.Close()
 	logger.Info("connected to postgres")
 
-	handler, err := app.NewHandler(cfg, pool, logger, app.Options{})
+	// Redis is optional. Without REDIS_URL the API runs without a product
+	// cache and without rate limiting. With it, Redis being DOWN is also
+	// fine: the client connects lazily and every use falls back gracefully.
+	opts := app.Options{}
+	if cfg.RedisURL != "" {
+		rdb, err := cache.NewRedisClient(cfg.RedisURL)
+		if err != nil {
+			return err
+		}
+		defer rdb.Close()
+		if err := rdb.Ping(ctx).Err(); err != nil {
+			logger.Warn("redis not reachable at startup; continuing without it until it comes back", "error", err)
+		} else {
+			logger.Info("connected to redis")
+		}
+		opts.Redis = rdb
+	} else {
+		logger.Warn("REDIS_URL not set: product cache and rate limiting are disabled")
+	}
+
+	handler, err := app.NewHandler(cfg, pool, logger, opts)
 	if err != nil {
 		return err
 	}

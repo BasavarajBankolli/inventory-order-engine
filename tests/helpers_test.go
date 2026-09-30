@@ -34,6 +34,13 @@ type testAPI struct {
 
 func newTestAPI(t *testing.T) *testAPI {
 	t.Helper()
+	return newTestAPIWith(t, nil)
+}
+
+// newTestAPIWith lets a test change the config and options (e.g. to plug in
+// Redis) before the app is built. Most tests run WITHOUT Redis.
+func newTestAPIWith(t *testing.T, customize func(*config.Config, *app.Options)) *testAPI {
+	t.Helper()
 	pool := testutil.NewMigratedPool(t)
 
 	cfg := config.Config{
@@ -43,9 +50,14 @@ func newTestAPI(t *testing.T) *testAPI {
 		PaymentTimeout:        300 * time.Millisecond, // keeps TIMEOUT tests fast
 		MockPaymentOutcome:    "SUCCESS",
 		PaymentReconcileAfter: time.Second,
+		ProductCacheTTL:       time.Minute,
 	}
-	handler, err := app.NewHandler(cfg, pool, logging.New(io.Discard, slog.LevelInfo),
-		app.Options{BcryptCost: bcrypt.MinCost})
+	opts := app.Options{BcryptCost: bcrypt.MinCost}
+	if customize != nil {
+		customize(&cfg, &opts)
+	}
+
+	handler, err := app.NewHandler(cfg, pool, logging.New(io.Discard, slog.LevelInfo), opts)
 	if err != nil {
 		t.Fatal(err)
 	}

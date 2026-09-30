@@ -2,7 +2,7 @@
 // endpoints used by Docker, Kubernetes and load balancers.
 //
 //	/health  "Is the process alive?"         Never touches dependencies.
-//	/ready   "Can it serve real traffic?"   Checks PostgreSQL (and Redis later).
+//	/ready   "Can it serve real traffic?"   Checks PostgreSQL and Redis.
 //
 // Why two endpoints? If the database goes down, restarting the API will not
 // fix it. The orchestrator should stop sending traffic (not ready) but keep
@@ -19,19 +19,30 @@ import (
 )
 
 // CheckFunc checks one dependency and returns an error if it is unusable.
-// Using a plain function (not an interface) keeps it easy to plug in
-// anything: pool.Ping for PostgreSQL today, a Redis ping in a later stage.
 type CheckFunc func(ctx context.Context) error
+
+// Check is one dependency to verify on /ready.
+type Check struct {
+	Name string
+	Fn   CheckFunc
+
+	// Required dependencies decide readiness: if PostgreSQL is down the API
+	// cannot do anything useful, so /ready returns 503.
+	//
+	// Optional ones only degrade the service: without Redis the API still
+	// works (no cache, no rate limiting), so /ready stays 200 with status
+	// "degraded" - taking the API out of rotation would make things WORSE.
+	Required bool
+}
 
 // Handler serves the health endpoints.
 type Handler struct {
-	checks  map[string]CheckFunc
+	checks  []Check
 	timeout time.Duration
 }
 
-// NewHandler creates a Handler. checks maps a dependency name
-// (e.g. "postgres") to the function that checks it.
-func NewHandler(checks map[string]CheckFunc) *Handler {
+// NewHandler creates a Handler.
+func NewHandler(checks ...Check) *Handler {
 	return &Handler{checks: checks, timeout: 2 * time.Second}
 }
 
@@ -45,28 +56,38 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, r, http.StatusOK, response{Status: "ok"})
 }
 
-// Ready returns 200 only if every dependency check passes, otherwise 503.
+// Ready returns:
+//
+//	200 {"status":"ready"}     every dependency is fine
+//	200 {"status":"degraded"}  an OPTIONAL dependency is down
+//	503 {"status":"not_ready"} a REQUIRED dependency is down
 func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusOK
 	resp := response{Status: "ready", Checks: make(map[string]string, len(h.checks))}
 
-	for name, check := range h.checks {
+	for _, c := range h.checks {
 		// Each check gets its own deadline so a hanging dependency cannot
 		// make the readiness probe itself hang.
 		ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
-		err := check(ctx)
+		err := c.Fn(ctx)
 		cancel()
 
-		if err != nil {
-			// The real error goes to the logs; the client only learns that
-			// the dependency is unavailable (no internal details leaked).
-			slog.WarnContext(r.Context(), "readiness check failed", "dependency", name, "error", err)
-			resp.Checks[name] = "unavailable"
-			resp.Status = "not_ready"
-			status = http.StatusServiceUnavailable
+		if err == nil {
+			resp.Checks[c.Name] = "ok"
 			continue
 		}
-		resp.Checks[name] = "ok"
+
+		// The real error goes to the logs; the client only learns that the
+		// dependency is unavailable (no internal details leaked).
+		slog.WarnContext(r.Context(), "readiness check failed",
+			"dependency", c.Name, "required", c.Required, "error", err)
+		resp.Checks[c.Name] = "unavailable"
+		if c.Required {
+			resp.Status = "not_ready"
+			status = http.StatusServiceUnavailable
+		} else if resp.Status == "ready" {
+			resp.Status = "degraded"
+		}
 	}
 
 	httpx.WriteJSON(w, r, status, resp)

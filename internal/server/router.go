@@ -36,6 +36,18 @@ type Deps struct {
 	// RequireAuth is the middleware that rejects requests without a valid
 	// access token.
 	RequireAuth func(http.Handler) http.Handler
+
+	// Rate limiters (Stage 11). nil = no rate limiting (e.g. no Redis).
+	RateLimitByIP   func(http.Handler) http.Handler // public routes
+	RateLimitByUser func(http.Handler) http.Handler // authenticated routes
+}
+
+// orPassThrough returns mw, or a middleware that does nothing if mw is nil.
+func orPassThrough(mw func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	if mw == nil {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	return mw
 }
 
 // NewRouter builds the complete HTTP handler for the API.
@@ -59,16 +71,25 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/ready", d.Health.Ready)
 
 	// Versioned business API.
+	// /health and /ready are NOT rate limited: infrastructure probes them
+	// constantly and must always get an answer.
 	r.Route("/api/v1", func(r chi.Router) {
-		// Public: no token needed.
-		r.Post("/auth/register", d.Auth.Register)
-		r.Post("/auth/login", d.Auth.Login)
-		r.Get("/products", d.Products.List)
-		r.Get("/products/{id}", d.Products.Get)
+		// Public: no token needed. Rate limited per client IP.
+		r.Group(func(r chi.Router) {
+			r.Use(orPassThrough(d.RateLimitByIP))
+
+			r.Post("/auth/register", d.Auth.Register)
+			r.Post("/auth/login", d.Auth.Login)
+			r.Get("/products", d.Products.List)
+			r.Get("/products/{id}", d.Products.Get)
+		})
 
 		// Authenticated: every route in this group needs a valid token.
+		// Rate limited per USER (the limiter runs after RequireAuth, so it
+		// knows who is calling).
 		r.Group(func(r chi.Router) {
 			r.Use(d.RequireAuth)
+			r.Use(orPassThrough(d.RateLimitByUser))
 
 			r.Get("/users/me", d.Users.Me)
 

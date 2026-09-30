@@ -33,6 +33,7 @@ const (
 	CodePaymentFailed        = "PAYMENT_FAILED"
 	CodePaymentTimeout       = "PAYMENT_TIMEOUT"
 	CodeReservationExpired   = "RESERVATION_EXPIRED"
+	CodeRateLimited          = "RATE_LIMITED"
 	CodeInvalidTransition    = "INVALID_STATE_TRANSITION"
 	CodeInternal             = "INTERNAL_ERROR"
 )

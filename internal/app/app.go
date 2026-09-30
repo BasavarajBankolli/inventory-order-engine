@@ -7,19 +7,24 @@
 package app
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 
 	"inventory-order-engine/internal/auth"
+	"inventory-order-engine/internal/cache"
 	"inventory-order-engine/internal/config"
 	"inventory-order-engine/internal/health"
 	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/orders"
 	"inventory-order-engine/internal/payments"
 	"inventory-order-engine/internal/products"
+	"inventory-order-engine/internal/ratelimit"
 	"inventory-order-engine/internal/server"
 	"inventory-order-engine/internal/users"
 )
@@ -29,6 +34,12 @@ type Options struct {
 	// BcryptCost defaults to bcrypt.DefaultCost. Tests use bcrypt.MinCost
 	// so that hashing thousands of passwords stays fast.
 	BcryptCost int
+
+	// Redis is optional. nil = no product cache and no rate limiting.
+	Redis *redis.Client
+
+	// RedisKeyPrefix keeps keys of parallel tests apart. Production: "".
+	RedisKeyPrefix string
 }
 
 // services holds every business service, built once.
@@ -50,6 +61,13 @@ func newServices(cfg config.Config, pool *pgxpool.Pool, opts Options) (*services
 	userRepo := users.NewRepository(pool)
 	productRepo := products.NewRepository(pool)
 	inventoryRepo := inventory.NewRepository(pool)
+
+	// The product cache is only used when Redis is configured. A nil
+	// products.Cache means "always read PostgreSQL".
+	var productCache products.Cache
+	if opts.Redis != nil {
+		productCache = cache.NewProductCache(opts.Redis, cfg.ProductCacheTTL, opts.RedisKeyPrefix)
+	}
 
 	// Services (business logic)
 	tokens := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTTTL)
@@ -78,7 +96,7 @@ func newServices(cfg config.Config, pool *pgxpool.Pool, opts Options) (*services
 		userRepo:  userRepo,
 		tokens:    tokens,
 		auth:      authService,
-		products:  products.NewService(pool, productRepo, inventoryRepo),
+		products:  products.NewService(pool, productRepo, inventoryRepo, productCache),
 		inventory: inventoryService,
 		orders:    orderService,
 	}, nil
@@ -91,16 +109,30 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts
 		return nil, err
 	}
 
-	return server.NewRouter(server.Deps{
-		Logger: logger,
-		Health: health.NewHandler(map[string]health.CheckFunc{
-			"postgres": pool.Ping,
-		}),
+	checks := []health.Check{{Name: "postgres", Fn: pool.Ping, Required: true}}
+	deps := server.Deps{
+		Logger:      logger,
 		Auth:        auth.NewHandler(s.auth),
 		Users:       users.NewHandler(s.userRepo),
 		Products:    products.NewHandler(s.products),
 		Inventory:   inventory.NewHandler(s.inventory),
 		Orders:      orders.NewHandler(s.orders),
 		RequireAuth: auth.RequireAuth(s.tokens),
-	}), nil
+	}
+
+	if opts.Redis != nil {
+		// Optional dependency: Redis down => /ready says "degraded", not 503.
+		checks = append(checks, health.Check{Name: "redis", Required: false, Fn: func(ctx context.Context) error {
+			return opts.Redis.Ping(ctx).Err()
+		}})
+
+		if cfg.RateLimitPerMinute > 0 {
+			limiter := ratelimit.NewLimiter(opts.Redis, cfg.RateLimitPerMinute, time.Minute, opts.RedisKeyPrefix)
+			deps.RateLimitByIP = ratelimit.Middleware(limiter, ratelimit.ByIP)
+			deps.RateLimitByUser = ratelimit.Middleware(limiter, ratelimit.ByUser)
+		}
+	}
+	deps.Health = health.NewHandler(checks...)
+
+	return server.NewRouter(deps), nil
 }

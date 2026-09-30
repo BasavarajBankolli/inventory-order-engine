@@ -244,6 +244,12 @@ func (c *client) call(method, path, token string, body any, wantStatus int, out 
 	if err != nil {
 		return err
 	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		// The rate limiter is doing its job: this demo logs in 100+ accounts
+		// from ONE IP, which is exactly the pattern it exists to stop.
+		return fmt.Errorf("rate limited (429) on %s %s. This demo sends hundreds of requests from one IP; "+
+			"raise the limit for demos: set RATE_LIMIT_PER_MINUTE=5000, then run: docker compose up -d api", method, path)
+	}
 	if resp.StatusCode != wantStatus {
 		return fmt.Errorf("%w %d from %s %s: %s", errStatus, resp.StatusCode, method, path, bytes.TrimSpace(data))
 	}

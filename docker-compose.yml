@@ -5,8 +5,7 @@
 # Start-up order (enforced with depends_on conditions):
 #   postgres (healthy) -> migrate (runs once, exits 0) -> api
 #                                                       -> worker
-#
-# Redis is added in a later stage.
+#   redis (cache + rate limiting; the API also runs without it)
 #
 # Values like ${POSTGRES_PASSWORD:-app_dev_password} read from your shell or
 # from a .env file next to this file, falling back to a LOCAL-ONLY default.
@@ -53,6 +52,9 @@ services:
       # Real deployments must inject a long random secret (never commit it).
       JWT_SECRET: ${JWT_SECRET:-local-dev-only-jwt-secret-change-me-0123456789}
       JWT_TTL: ${JWT_TTL:-1h}
+      REDIS_URL: redis://redis:6379/0
+      PRODUCT_CACHE_TTL: ${PRODUCT_CACHE_TTL:-5m}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-100}
       RESERVATION_TTL: ${RESERVATION_TTL:-15m}
       PAYMENT_TIMEOUT: ${PAYMENT_TIMEOUT:-5s}
       MOCK_PAYMENT_OUTCOME: ${MOCK_PAYMENT_OUTCOME:-SUCCESS}
@@ -61,12 +63,28 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        # "started", not "healthy": the API does not NEED Redis to work.
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 5s
       timeout: 3s
       retries: 10
     restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # No persistence: everything in Redis can be rebuilt (cache) or is
+    # fine to lose (rate-limit counters). PostgreSQL is the source of truth.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   worker:
     build: .

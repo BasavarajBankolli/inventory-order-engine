@@ -28,8 +28,8 @@ func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	router := NewRouter(Deps{
 		Logger: logging.New(io.Discard, slog.LevelInfo),
-		Health: health.NewHandler(map[string]health.CheckFunc{
-			"postgres": func(context.Context) error { return nil },
+		Health: health.NewHandler(health.Check{
+			Name: "postgres", Required: true, Fn: func(context.Context) error { return nil },
 		}),
 		Auth:        auth.NewHandler(nil),
 		Users:       users.NewHandler(nil),

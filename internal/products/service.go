@@ -25,11 +25,24 @@ type Service struct {
 	pool      *pgxpool.Pool // to start transactions
 	repo      *Repository
 	inventory *inventory.Repository
+	cache     Cache // may be nil: then every read goes to PostgreSQL
 }
 
-// NewService creates a products Service.
-func NewService(pool *pgxpool.Pool, repo *Repository, inv *inventory.Repository) *Service {
-	return &Service{pool: pool, repo: repo, inventory: inv}
+// Cache is a read-through cache for single products (Redis in production,
+// see internal/cache). It is an interface so this package does not depend on
+// Redis, and so the service works the same with no cache at all.
+//
+// The cache is NEVER the source of truth: every method may fail, and the
+// service then simply uses PostgreSQL.
+type Cache interface {
+	Get(ctx context.Context, id int64) (p Product, found bool, err error)
+	Set(ctx context.Context, p Product) error
+	Delete(ctx context.Context, id int64) error
+}
+
+// NewService creates a products Service. cache may be nil.
+func NewService(pool *pgxpool.Pool, repo *Repository, inv *inventory.Repository, cache Cache) *Service {
+	return &Service{pool: pool, repo: repo, inventory: inv, cache: cache}
 }
 
 // CreateInput is the data needed to create a product.
@@ -100,8 +113,54 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Product, error) {
 }
 
 // Get returns one product. Archived products count as not found.
+//
+// CACHE-ASIDE ("lazy loading"):
+//
+//  1. look in the cache           -> hit: return it (no database query)
+//  2. miss: read PostgreSQL        -> the source of truth
+//  3. put the result in the cache  -> the next Get is a hit
+//
+// A broken cache (Redis down, bad data) is logged and treated as a miss, so
+// a cache outage makes the API slower, never wrong or unavailable.
 func (s *Service) Get(ctx context.Context, id int64) (Product, error) {
-	return s.repo.GetByID(ctx, id)
+	if s.cache != nil {
+		p, found, err := s.cache.Get(ctx, id)
+		if err != nil {
+			slog.WarnContext(ctx, "product cache read failed; using database", "product_id", id, "error", err)
+		} else if found {
+			slog.DebugContext(ctx, "product cache hit", "product_id", id)
+			return p, nil
+		}
+	}
+
+	p, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return Product{}, err // not-found results are not cached
+	}
+
+	if s.cache != nil {
+		if err := s.cache.Set(ctx, p); err != nil {
+			slog.WarnContext(ctx, "product cache write failed", "product_id", id, "error", err)
+		}
+	}
+	return p, nil
+}
+
+// invalidate removes a product from the cache AFTER the database change
+// committed. Deleting (rather than writing the new value) is the simplest
+// correct choice: the next Get loads the fresh row.
+//
+// If the delete fails, the stale entry still disappears when its TTL runs
+// out - that bounded staleness is the price of a cache, and why prices in
+// ORDERS are always read from PostgreSQL, never from the cache.
+func (s *Service) invalidate(ctx context.Context, id int64) {
+	if s.cache == nil {
+		return
+	}
+	if err := s.cache.Delete(ctx, id); err != nil {
+		slog.WarnContext(ctx, "product cache invalidation failed; entry will expire via TTL",
+			"product_id", id, "error", err)
+	}
 }
 
 // List returns one page of products matching the filters.
@@ -129,6 +188,7 @@ func (s *Service) Update(ctx context.Context, id int64, in UpdateInput) (Product
 	if err != nil {
 		return Product{}, err
 	}
+	s.invalidate(ctx, id)
 	slog.InfoContext(ctx, "product updated", "product_id", p.ID)
 	return p, nil
 }
@@ -139,6 +199,7 @@ func (s *Service) Archive(ctx context.Context, id int64) error {
 	if err := s.repo.Archive(ctx, id); err != nil {
 		return err
 	}
+	s.invalidate(ctx, id)
 	slog.InfoContext(ctx, "product archived", "product_id", id)
 	return nil
 }

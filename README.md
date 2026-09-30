@@ -6,7 +6,7 @@ It is built to handle concurrent orders correctly and **never oversell stock**.
 This is a learning and portfolio project, so the code favours clarity over cleverness.
 Each module has a matching explanation in [`docs/learning/`](docs/learning/).
 
-> **Status: Stage 10 of 15 — orders, reservations, concurrency, idempotency, payments, background worker.**
+> **Status: Stage 11 of 15 — orders, reservations, concurrency, idempotency, payments, worker, Redis.**
 > This README grows with each stage.
 
 ---
@@ -20,6 +20,7 @@ flowchart LR
         migrate[migrate<br/>runs once, exits] -->|applies SQL| pg[(PostgreSQL 17)]
         api[api<br/>Go HTTP server] -->|pgx pool| pg
         worker[worker<br/>expires reservations,<br/>reconciles payments] -->|pgx pool| pg
+        api -->|cache + rate limit<br/>optional| redis[(Redis 7)]
     end
 ```
 
@@ -88,6 +89,9 @@ Proof: `go test -race -count=20 -run Concurrency ./internal/orders/`, plus the l
 go run ./cmd/concurrency-demo            # 100 buyers, stock 1 -> 1 x 201, 99 x 409 OUT_OF_STOCK
 ```
 
+> The demo logs in 100+ buyers from one IP, and the rate limiter (100/min) stops that on purpose.
+> For demos: `$env:RATE_LIMIT_PER_MINUTE = "5000"; docker compose up -d api`.
+
 Details: [docs/learning/07-transactions-and-concurrency.md](docs/learning/07-transactions-and-concurrency.md).
 
 ### Idempotency: retries never duplicate an order
@@ -131,6 +135,16 @@ Each order is handled in its own transaction that locks the order and re-checks 
 running the worker twice, or two workers at once, is safe. Details:
 [docs/learning/10-workers.md](docs/learning/10-workers.md).
 
+### Redis: cache and rate limiting (optional, never the source of truth)
+
+| Feature | How |
+|---|---|
+| Product cache | Cache-aside on `GET /products/{id}`, 5 min TTL, deleted on update/archive. Orders **never** read it |
+| Rate limiting | Fixed window per minute: per IP on public routes, per user when logged in. `429` + `Retry-After` |
+| Redis down | Cache → PostgreSQL, rate limiter fails **open**, `/ready` → `degraded`. A circuit breaker skips Redis for 5 s after a failure, so requests stay fast |
+
+Details: [docs/learning/11-redis.md](docs/learning/11-redis.md).
+
 ### Folder layout
 
 ```text
@@ -142,6 +156,7 @@ cmd/
 internal/
   app/                 Builds every module and connects them (used by main and API tests)
   auth/                Register/login service, bcrypt, JWT, RequireAuth/RequireRole middleware
+  cache/               Redis client (fail-fast + circuit breaker) and product cache
   config/              Reads settings from environment variables
   database/            PostgreSQL pool, migration runner, WithTx transaction helper
   health/              /health (liveness) and /ready (readiness)
@@ -153,7 +168,8 @@ internal/
   money/               Money type (integer minor units + currency)
   orders/              Orders + items, price snapshot, totals, state machine, ownership, cancel, pay
   payments/            Provider interface, mock provider, payments repository
-  products/            Product catalogue: validation, soft delete, list/search/sort/paginate
+  products/            Product catalogue: validation, soft delete, list/search/sort/paginate, cache-aside
+  ratelimit/           Fixed-window rate limiter (Redis) + middleware (per IP / per user)
   requestid/           Stores and reads the request ID in context.Context
   server/              Router: maps URLs to handlers
   testutil/            Helpers used only by tests (isolated, migrated test schemas)
@@ -166,8 +182,7 @@ docs/learning/         Beginner-friendly explanations for every module
 tests/                 End-to-end API tests (HTTP -> router -> services -> PostgreSQL)
 ```
 
-Packages such as `events/`,
-and `cache/` are added in later stages. There is no `pkg/` folder, because
+The `events/` package (outbox) is added in Stage 12. There is no `pkg/` folder, because
 nothing here is meant to be imported by other projects.
 
 ## Technology choices
@@ -183,8 +198,9 @@ nothing here is meant to be imported by other projects.
 | Config | `os.Getenv` (stdlib) | Env vars are enough; no config library needed |
 | Migrations | Own ~100-line runner | Easy to read end to end; uses advisory locks and transactional DDL |
 | Database | PostgreSQL 17 | Source of truth: transactions, row locks, constraints |
+| Cache / rate limiting | Redis 7 + `redis/go-redis/v9` | Sub-millisecond reads and atomic counters shared by all API instances |
 
-Redis is added in Stage 11.
+
 
 ---
 
@@ -249,9 +265,10 @@ docker compose down -v
 # Unit tests only (no database needed; integration tests are skipped)
 go test ./...
 
-# Unit + integration tests (needs the postgres container running)
-docker compose up -d postgres
+# Unit + integration tests (needs the postgres and redis containers running)
+docker compose up -d postgres redis
 $env:TEST_DATABASE_URL = "postgres://app:app_dev_password@localhost:5432/inventory_test?sslmode=disable"
+$env:TEST_REDIS_URL = "redis://localhost:6379/15"
 go test -count=1 ./...
 
 # Verbose output for one package
@@ -378,7 +395,7 @@ docker compose exec postgres psql -U app -d inventory -c "UPDATE users SET role 
 8. ✅ Idempotency keys
 9. ✅ Mock payments
 10. ✅ Background workers (reservation expiry)
-11. Redis (cache and rate limiting)
+11. ✅ Redis (cache and rate limiting)
 12. Transactional outbox
 13. Test suite hardening
 14. Observability (Prometheus metrics)

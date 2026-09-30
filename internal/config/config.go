@@ -65,6 +65,17 @@ type Config struct {
 
 	// WorkerBatchSize caps how many orders one job run handles.
 	WorkerBatchSize int
+
+	// RedisURL, e.g. redis://redis:6379/0. Empty = run without Redis
+	// (no product cache, no rate limiting). Redis is never required.
+	RedisURL string
+
+	// ProductCacheTTL is how long a product stays in the Redis cache.
+	ProductCacheTTL time.Duration
+
+	// RateLimitPerMinute is how many requests one user (or IP, for public
+	// routes) may make per minute. 0 disables rate limiting.
+	RateLimitPerMinute int
 }
 
 // minJWTSecretLen: HMAC-SHA256 keys shorter than 32 bytes (256 bits) are
@@ -88,6 +99,9 @@ func Load() (Config, error) {
 		PaymentReconcileAfter: time.Minute,
 		WorkerInterval:        10 * time.Second,
 		WorkerBatchSize:       100,
+		RedisURL:              os.Getenv("REDIS_URL"),
+		ProductCacheTTL:       5 * time.Minute,
+		RateLimitPerMinute:    100,
 	}
 
 	// Required values: there is no safe default for a database password.
@@ -172,6 +186,22 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("WORKER_BATCH_SIZE must be between 1 and 10000, got %q", v)
 		}
 		cfg.WorkerBatchSize = n
+	}
+
+	if v := os.Getenv("PRODUCT_CACHE_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("PRODUCT_CACHE_TTL must be a positive duration like 5m, got %q", v)
+		}
+		cfg.ProductCacheTTL = d
+	}
+
+	if v := os.Getenv("RATE_LIMIT_PER_MINUTE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return Config{}, fmt.Errorf("RATE_LIMIT_PER_MINUTE must be 0 (off) or a positive integer, got %q", v)
+		}
+		cfg.RateLimitPerMinute = n
 	}
 
 	return cfg, nil
