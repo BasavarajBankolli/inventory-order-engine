@@ -13,14 +13,15 @@ import (
 	"io"
 	"log/slog"
 
+	"inventory-order-engine/internal/identity"
 	"inventory-order-engine/internal/requestid"
 )
 
 // New returns a JSON logger that writes to w at the given minimum level.
 //
-// The returned logger automatically adds "request_id" to every log line
-// written with a context that carries one (slog.InfoContext(ctx, ...),
-// logger.ErrorContext(ctx, ...), etc.).
+// The returned logger automatically adds "request_id" (and "user_id" once
+// the caller is authenticated) to every log line written with a context
+// that carries them (slog.InfoContext(ctx, ...), logger.ErrorContext(ctx, ...)).
 func New(w io.Writer, level slog.Level) *slog.Logger {
 	jsonHandler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})
 	return slog.New(contextHandler{Handler: jsonHandler})
@@ -35,6 +36,9 @@ type contextHandler struct {
 func (h contextHandler) Handle(ctx context.Context, r slog.Record) error {
 	if id := requestid.FromContext(ctx); id != "" {
 		r.AddAttrs(slog.String("request_id", id))
+	}
+	if p, ok := identity.FromContext(ctx); ok {
+		r.AddAttrs(slog.Int64("user_id", p.UserID))
 	}
 	return h.Handler.Handle(ctx, r)
 }

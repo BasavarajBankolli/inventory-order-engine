@@ -1,7 +1,7 @@
 // Command api starts the HTTP API server.
 //
-// main() only wires things together: load config -> create logger ->
-// connect to PostgreSQL -> build router -> serve -> shut down gracefully.
+// main() only starts things: load config -> create logger -> connect to
+// PostgreSQL -> build the app (internal/app) -> serve -> shut down gracefully.
 // No business logic lives here.
 package main
 
@@ -15,11 +15,10 @@ import (
 	"syscall"
 	"time"
 
+	"inventory-order-engine/internal/app"
 	"inventory-order-engine/internal/config"
 	"inventory-order-engine/internal/database"
-	"inventory-order-engine/internal/health"
 	"inventory-order-engine/internal/logging"
-	"inventory-order-engine/internal/server"
 )
 
 func main() {
@@ -32,7 +31,7 @@ func main() {
 // run contains the real startup logic. Returning an error (instead of
 // calling os.Exit deep inside) lets every defer run and keeps main tiny.
 func run() error {
-	cfg, err := config.Load()
+	cfg, err := config.LoadAPI()
 	if err != nil {
 		return err
 	}
@@ -54,13 +53,14 @@ func run() error {
 	defer pool.Close()
 	logger.Info("connected to postgres")
 
-	healthHandler := health.NewHandler(map[string]health.CheckFunc{
-		"postgres": pool.Ping,
-	})
+	handler, err := app.NewHandler(cfg, pool, logger, app.Options{})
+	if err != nil {
+		return err
+	}
 
 	srv := &http.Server{
 		Addr:    cfg.HTTPAddr,
-		Handler: server.NewRouter(server.Deps{Logger: logger, Health: healthHandler}),
+		Handler: handler,
 		// Timeouts protect the server from slow or malicious clients that
 		// would otherwise hold connections (and goroutines) open forever.
 		ReadHeaderTimeout: 5 * time.Second,

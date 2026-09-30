@@ -11,16 +11,24 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"inventory-order-engine/internal/auth"
 	"inventory-order-engine/internal/health"
 	"inventory-order-engine/internal/httpx"
 	"inventory-order-engine/internal/middleware"
+	"inventory-order-engine/internal/users"
 )
 
-// Deps lists everything the router needs. New modules (auth, products,
-// orders, ...) add their handlers here in later stages.
+// Deps lists everything the router needs. New modules (products, orders,
+// ...) add their handlers here in later stages.
 type Deps struct {
 	Logger *slog.Logger
 	Health *health.Handler
+	Auth   *auth.Handler
+	Users  *users.Handler
+
+	// RequireAuth is the middleware that rejects requests without a valid
+	// access token.
+	RequireAuth func(http.Handler) http.Handler
 }
 
 // NewRouter builds the complete HTTP handler for the API.
@@ -43,7 +51,19 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/health", d.Health.Health)
 	r.Get("/ready", d.Health.Ready)
 
-	// The versioned business API (/api/v1/...) is added from Stage 2 onwards.
+	// Versioned business API.
+	r.Route("/api/v1", func(r chi.Router) {
+		// Public: anyone can register or log in.
+		r.Post("/auth/register", d.Auth.Register)
+		r.Post("/auth/login", d.Auth.Login)
+
+		// Authenticated: every route in this group needs a valid token.
+		r.Group(func(r chi.Router) {
+			r.Use(d.RequireAuth)
+
+			r.Get("/users/me", d.Users.Me)
+		})
+	})
 
 	return r
 }

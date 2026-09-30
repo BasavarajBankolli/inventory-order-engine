@@ -10,31 +10,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"inventory-order-engine/internal/database"
-	"inventory-order-engine/internal/requestid"
 	"inventory-order-engine/internal/testutil"
 	"inventory-order-engine/migrations"
 )
 
 // Integration tests: they need a real PostgreSQL (TEST_DATABASE_URL).
 //
-// Each test creates its own empty schema and points search_path at it, so
-// tests start from a clean slate and never see each other's tables.
-
-func isolatedPool(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	ctx := context.Background()
-	schema := "test_" + requestid.New()[:12]
-
-	admin := testutil.NewPool(t, "")
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
-	})
-
-	return testutil.NewPool(t, schema)
-}
+// Each test gets its own empty schema (testutil.NewIsolatedPool), so tests
+// start from a clean slate and never see each other's tables.
 
 func tableExists(t *testing.T, pool *pgxpool.Pool, name string) bool {
 	t.Helper()
@@ -49,7 +32,7 @@ func tableExists(t *testing.T, pool *pgxpool.Pool, name string) bool {
 }
 
 func TestMigrate_AppliesInOrderAndIsIdempotent(t *testing.T) {
-	pool := isolatedPool(t)
+	pool := testutil.NewIsolatedPool(t)
 	ctx := context.Background()
 
 	fsys := fstest.MapFS{
@@ -82,7 +65,7 @@ func TestMigrate_AppliesInOrderAndIsIdempotent(t *testing.T) {
 }
 
 func TestMigrate_FailedMigrationIsRolledBackAndNotRecorded(t *testing.T) {
-	pool := isolatedPool(t)
+	pool := testutil.NewIsolatedPool(t)
 	ctx := context.Background()
 
 	fsys := fstest.MapFS{
@@ -123,7 +106,7 @@ func TestMigrate_FailedMigrationIsRolledBackAndNotRecorded(t *testing.T) {
 }
 
 func TestMigrate_ConcurrentRunnersApplyEachMigrationOnce(t *testing.T) {
-	pool := isolatedPool(t)
+	pool := testutil.NewIsolatedPool(t)
 	ctx := context.Background()
 
 	// This migration fails if it runs twice (CREATE TABLE without
@@ -166,7 +149,7 @@ func TestMigrate_ConcurrentRunnersApplyEachMigrationOnce(t *testing.T) {
 }
 
 func TestMigrate_RealMigrationsApply(t *testing.T) {
-	pool := isolatedPool(t)
+	pool := testutil.NewIsolatedPool(t)
 
 	// The project's real migration files must apply cleanly to an empty
 	// schema. This catches SQL syntax errors before deployment.

@@ -51,6 +51,36 @@ func TestLoad_Overrides(t *testing.T) {
 	}
 }
 
+func TestLoadAPI_JWTSettings(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5432/db")
+	t.Setenv("JWT_TTL", "")
+
+	t.Setenv("JWT_SECRET", "")
+	if _, err := LoadAPI(); err == nil {
+		t.Error("LoadAPI() with no JWT_SECRET: error = nil, want error")
+	}
+
+	t.Setenv("JWT_SECRET", "too-short")
+	if _, err := LoadAPI(); err == nil {
+		t.Error("LoadAPI() with short JWT_SECRET: error = nil, want error")
+	}
+
+	t.Setenv("JWT_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("JWT_TTL", "15m")
+	cfg, err := LoadAPI()
+	if err != nil {
+		t.Fatalf("LoadAPI() error = %v", err)
+	}
+	if cfg.JWTTTL != 15*time.Minute {
+		t.Errorf("JWTTTL = %v, want 15m", cfg.JWTTTL)
+	}
+
+	t.Setenv("JWT_TTL", "forever")
+	if _, err := LoadAPI(); err == nil {
+		t.Error("LoadAPI() with bad JWT_TTL: error = nil, want error")
+	}
+}
+
 func TestLoad_Errors(t *testing.T) {
 	// Table-driven test: each row is one scenario. This is the most common
 	// testing style in Go.

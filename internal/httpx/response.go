@@ -15,12 +15,16 @@ import (
 
 // Machine-readable error codes. Clients should branch on the code, never on
 // the human-readable message (messages may change, codes may not).
-// More codes (OUT_OF_STOCK, CONFLICT, ...) are added in later stages.
+// More codes (OUT_OF_STOCK, ...) are added in later stages.
 const (
-	CodeValidation       = "VALIDATION_ERROR"
-	CodeNotFound         = "NOT_FOUND"
-	CodeMethodNotAllowed = "METHOD_NOT_ALLOWED"
-	CodeInternal         = "INTERNAL_ERROR"
+	CodeValidation         = "VALIDATION_ERROR"
+	CodeUnauthenticated    = "UNAUTHENTICATED"
+	CodeInvalidCredentials = "INVALID_CREDENTIALS"
+	CodeForbidden          = "FORBIDDEN"
+	CodeNotFound           = "NOT_FOUND"
+	CodeMethodNotAllowed   = "METHOD_NOT_ALLOWED"
+	CodeEmailTaken         = "EMAIL_ALREADY_EXISTS"
+	CodeInternal           = "INTERNAL_ERROR"
 )
 
 // ErrorBody is the JSON shape of every error response.
@@ -30,9 +34,12 @@ type ErrorBody struct {
 
 // ErrorDetail describes what went wrong.
 type ErrorDetail struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	RequestID string `json:"request_id,omitempty"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	// Fields lists per-field problems for VALIDATION_ERROR responses,
+	// e.g. {"email": "must be a valid email address"}.
+	Fields    map[string]string `json:"fields,omitempty"`
+	RequestID string            `json:"request_id,omitempty"`
 }
 
 // WriteJSON writes v as a JSON response with the given status code.
@@ -56,6 +63,26 @@ func WriteError(w http.ResponseWriter, r *http.Request, status int, code, messag
 		Message:   message,
 		RequestID: requestid.FromContext(r.Context()),
 	}})
+}
+
+// WriteValidationError writes a 400 listing every invalid field.
+func WriteValidationError(w http.ResponseWriter, r *http.Request, fields map[string]string) {
+	WriteJSON(w, r, http.StatusBadRequest, ErrorBody{Error: ErrorDetail{
+		Code:      CodeValidation,
+		Message:   "one or more fields are invalid",
+		Fields:    fields,
+		RequestID: requestid.FromContext(r.Context()),
+	}})
+}
+
+// WriteInternalError logs the real error (with request_id, via the context)
+// and sends the client a generic 500. The client gets the request_id so the
+// error can be found in the logs, but never sees internal details such as
+// SQL text, table names or stack traces.
+func WriteInternalError(w http.ResponseWriter, r *http.Request, err error) {
+	slog.ErrorContext(r.Context(), "internal error",
+		"method", r.Method, "path", r.URL.Path, "error", err)
+	WriteError(w, r, http.StatusInternalServerError, CodeInternal, "internal server error")
 }
 
 // NotFound is used for URLs that match no route.

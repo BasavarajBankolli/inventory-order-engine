@@ -48,6 +48,10 @@ services:
       HTTP_ADDR: ":8080"
       DATABASE_URL: postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app_dev_password}@postgres:5432/${POSTGRES_DB:-inventory}?sslmode=disable
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # LOCAL-ONLY default so `docker compose up` works out of the box.
+      # Real deployments must inject a long random secret (never commit it).
+      JWT_SECRET: ${JWT_SECRET:-local-dev-only-jwt-secret-change-me-0123456789}
+      JWT_TTL: ${JWT_TTL:-1h}
     ports:
       - "${API_PORT:-8080}:8080"
     depends_on:

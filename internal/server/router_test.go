@@ -9,14 +9,18 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"inventory-order-engine/internal/auth"
 	"inventory-order-engine/internal/health"
 	"inventory-order-engine/internal/httpx"
 	"inventory-order-engine/internal/logging"
 	"inventory-order-engine/internal/requestid"
+	"inventory-order-engine/internal/users"
 )
 
 // newTestServer starts a real HTTP server (on a random local port) running
-// the full router, including all middleware.
+// the full router, including all middleware. Business handlers get nil
+// dependencies: these tests only exercise the infrastructure routes. The
+// full API with a real database is tested in the tests/ folder.
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	router := NewRouter(Deps{
@@ -24,6 +28,9 @@ func newTestServer(t *testing.T) *httptest.Server {
 		Health: health.NewHandler(map[string]health.CheckFunc{
 			"postgres": func(context.Context) error { return nil },
 		}),
+		Auth:        auth.NewHandler(nil),
+		Users:       users.NewHandler(nil),
+		RequireAuth: func(next http.Handler) http.Handler { return next },
 	})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)

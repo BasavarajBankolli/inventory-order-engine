@@ -35,7 +35,18 @@ type Config struct {
 	// ShutdownTimeout is how long we wait for in-flight requests to finish
 	// when the process is asked to stop.
 	ShutdownTimeout time.Duration
+
+	// JWTSecret signs access tokens. Anyone who knows it can forge a token
+	// for any user, so it must be long, random and kept out of git.
+	JWTSecret string
+
+	// JWTTTL is how long an access token stays valid after login.
+	JWTTTL time.Duration
 }
+
+// minJWTSecretLen: HMAC-SHA256 keys shorter than 32 bytes (256 bits) are
+// weaker than the algorithm itself and easier to brute-force.
+const minJWTSecretLen = 32
 
 // Load reads the configuration from environment variables.
 // It returns an error (instead of panicking) so main() decides what to do.
@@ -46,6 +57,8 @@ func Load() (Config, error) {
 		DBMaxConns:      10,
 		LogLevel:        slog.LevelInfo,
 		ShutdownTimeout: 10 * time.Second,
+		JWTSecret:       os.Getenv("JWT_SECRET"),
+		JWTTTL:          time.Hour,
 	}
 
 	// Required values: there is no safe default for a database password.
@@ -75,6 +88,29 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("SHUTDOWN_TIMEOUT must be a positive duration like 10s, got %q", v)
 		}
 		cfg.ShutdownTimeout = d
+	}
+
+	return cfg, nil
+}
+
+// LoadAPI is Load plus the settings only the API server needs (the migrate
+// command has no use for a JWT secret, so it must not be forced to set one).
+func LoadAPI() (Config, error) {
+	cfg, err := Load()
+	if err != nil {
+		return Config{}, err
+	}
+
+	if len(cfg.JWTSecret) < minJWTSecretLen {
+		return Config{}, fmt.Errorf("JWT_SECRET is required and must be at least %d characters", minJWTSecretLen)
+	}
+
+	if v := os.Getenv("JWT_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("JWT_TTL must be a positive duration like 1h, got %q", v)
+		}
+		cfg.JWTTTL = d
 	}
 
 	return cfg, nil
