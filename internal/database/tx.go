@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -52,6 +53,13 @@ func WithTx(ctx context.Context, pool *pgxpool.Pool, fn func(tx pgx.Tx) error) e
 	defer tx.Rollback(ctx)
 
 	if err := fn(tx); err != nil {
+		// If the context was cancelled (client gave up, shutdown), the
+		// database error is just a symptom, e.g. "canceling statement due
+		// to user request". Wrap it so callers can still recognise the
+		// cause with errors.Is(err, context.Canceled).
+		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+			return fmt.Errorf("%w: %w", ctxErr, err)
+		}
 		return err
 	}
 

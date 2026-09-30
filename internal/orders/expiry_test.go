@@ -5,10 +5,14 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
+	"inventory-order-engine/internal/events"
+	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/money"
 	"inventory-order-engine/internal/orders"
 	"inventory-order-engine/internal/payments"
+	"inventory-order-engine/internal/products"
 )
 
 // Integration tests for the Stage 10 expiry/reconciliation job.
@@ -239,6 +243,52 @@ func TestReconcile_NeverChargedIsExpired(t *testing.T) {
 		t.Errorf("stock = %+v, want 10/0", st)
 	}
 	f.assertInvariant(t)
+}
+
+// unreachableProvider simulates a payment provider that is down.
+type unreachableProvider struct{}
+
+func (unreachableProvider) Charge(context.Context, payments.ChargeRequest) (payments.Result, error) {
+	return payments.Result{}, payments.ErrProviderUnavailable
+}
+
+func (unreachableProvider) Status(context.Context, string) (payments.Result, error) {
+	return payments.Result{}, payments.ErrProviderUnavailable
+}
+
+// The provider cannot be reached during reconciliation. The worker must
+// NOT guess (the customer may have been charged): it changes nothing and
+// tries again on the next run.
+func TestReconcile_ProviderUnreachableChangesNothing(t *testing.T) {
+	f := setup(t)
+	o, p := f.placeOrder(t, "REC-DOWN", 10, 2)
+	if _, err := f.svc.Pay(simulate(payments.OutcomeTimeout), f.alice, o.ID); !errors.Is(err, orders.ErrPaymentOutcomeUnknown) {
+		t.Fatal(err)
+	}
+	f.expireReservations(t, o.ID, "5 seconds")
+
+	svc := orders.NewService(orders.Deps{
+		Pool: f.pool, Orders: orders.NewRepository(f.pool), Products: products.NewRepository(f.pool),
+		Inventory: inventory.NewService(f.pool, inventory.NewRepository(f.pool)),
+		Payments:  payments.NewRepository(f.pool), Provider: unreachableProvider{},
+		Outbox: events.NewOutbox(f.pool), ReservationTTL: time.Minute,
+		PaymentTimeout: 200 * time.Millisecond, ReconcileAfter: time.Second,
+	})
+	rep, err := svc.ExpireOverdue(context.Background(), 100)
+	if err != nil || rep.Skipped != 1 || rep.Total() != 0 {
+		t.Fatalf("report = %+v, %v; want 1 skipped and nothing changed", rep, err)
+	}
+	if s := f.status(t, o.ID); s != orders.StatusPaymentPending {
+		t.Errorf("status = %s, want still PAYMENT_PENDING", s)
+	}
+	if st := f.stockOf(t, p); st != (stock{8, 2}) {
+		t.Errorf("stock = %+v, want still 8/2", st)
+	}
+
+	// Once the provider is back, the normal service resolves it.
+	if rep := f.expire(t); rep.Confirmed != 1 {
+		t.Errorf("after the provider recovered: %+v, want 1 confirmed", rep)
+	}
 }
 
 // The provider declined, but we crashed before recording it. The worker

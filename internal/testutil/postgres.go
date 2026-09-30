@@ -40,6 +40,8 @@ func NewPool(t *testing.T, searchPath string) *pgxpool.Pool {
 	if searchPath != "" {
 		cfg.ConnConfig.RuntimeParams["search_path"] = searchPath
 	}
+	// Same cancellation behaviour as the production pool (database.Connect).
+	database.CancelQueriesOnContextDone(cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

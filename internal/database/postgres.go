@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -26,6 +28,7 @@ func Connect(ctx context.Context, databaseURL string, maxConns int32) (*pgxpool.
 	}
 	cfg.MaxConns = maxConns
 	cfg.MaxConnIdleTime = 5 * time.Minute
+	CancelQueriesOnContextDone(cfg)
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
@@ -42,4 +45,26 @@ func Connect(ctx context.Context, databaseURL string, maxConns int32) (*pgxpool.
 	}
 
 	return pool, nil
+}
+
+// CancelQueriesOnContextDone makes a cancelled context (client gave up,
+// request timed out, shutdown) also stop the query ON THE SERVER.
+//
+// pgx's default only closes our end of the connection. A PostgreSQL
+// backend that is waiting for a row lock does not notice that until the
+// lock is granted and it tries to reply - meanwhile it keeps its locks and
+// a server connection (a "zombie" session). Found by
+// TestFailure_ClientCancelsWhileWaiting in Stage 13.
+//
+// With this handler pgx sends PostgreSQL a CANCEL REQUEST immediately; the
+// server aborts the query, rolls the transaction back and frees the locks.
+// The 1 s deadline is a fallback in case the cancel request itself is lost.
+func CancelQueriesOnContextDone(cfg *pgxpool.Config) {
+	cfg.ConnConfig.BuildContextWatcherHandler = func(conn *pgconn.PgConn) ctxwatch.Handler {
+		return &pgconn.CancelRequestContextWatcherHandler{
+			Conn:               conn,
+			CancelRequestDelay: 0,
+			DeadlineDelay:      time.Second,
+		}
+	}
 }

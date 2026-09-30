@@ -6,7 +6,7 @@ It is built to handle concurrent orders correctly and **never oversell stock**.
 This is a learning and portfolio project, so the code favours clarity over cleverness.
 Each module has a matching explanation in [`docs/learning/`](docs/learning/).
 
-> **Status: Stage 12 of 15 — orders, reservations, concurrency, idempotency, payments, worker, Redis, outbox events.**
+> **Status: Stage 13 of 15 — all features built; 359 tests (unit, integration, concurrency, failure), 88.7% coverage.**
 > This README grows with each stage.
 
 ---
@@ -164,6 +164,8 @@ Delivery is at-least-once, so consumers must ignore event ids they've already se
 cmd/
   api/main.go          Starts the HTTP server (wiring only, no business logic)
   concurrency-demo/    Fires N simultaneous orders at the running API and reports the outcome
+scripts/
+  test.ps1             Runs the whole test suite (Docker deps, env vars, vet, race, coverage)
   migrate/main.go      Applies pending SQL migrations, then exits
   worker/main.go       Background jobs: reservation expiry and payment reconciliation
 internal/
@@ -275,26 +277,39 @@ docker compose down -v
 
 ## Testing
 
-```powershell
-# Unit tests only (no database needed; integration tests are skipped)
-go test ./...
+One command runs everything correctly: it starts PostgreSQL and Redis, sets the test
+environment, runs `gofmt`/`go vet`, runs all tests, and reports skipped tests and coverage.
 
-# Unit + integration tests (needs the postgres and redis containers running)
+```powershell
+.\scripts\test.ps1                        # all tests
+.\scripts\test.ps1 -Race -Coverage        # + race detector + coverage report (coverage.html)
+.\scripts\test.ps1 -Run Concurrency -Count 20 -Race
+```
+
+Latest full run: **359 passed, 0 failed, 0 skipped; 88.7% statement coverage** (merged across
+all test binaries).
+
+| Kind | Where | Needs DB/Redis |
+|---|---|---|
+| Unit (pure logic) | `internal/**/..._test.go` | no |
+| Integration (repositories, transactions, concurrency, failures) | `internal/**/..._test.go` | yes |
+| End-to-end API (real HTTP) | `tests/` | yes |
+
+Every integration test runs in its own migrated PostgreSQL schema and its own Redis key prefix,
+so tests never share data. The test catalogue, mapped to every requirement, is in
+[docs/learning/13-testing.md](docs/learning/13-testing.md), along with the list of real bugs the
+tests found.
+
+Running without the script:
+
+```powershell
 docker compose up -d postgres redis
 $env:TEST_DATABASE_URL = "postgres://app:app_dev_password@localhost:5432/inventory_test?sslmode=disable"
 $env:TEST_REDIS_URL = "redis://localhost:6379/15"
 go test -count=1 ./...
-
-# Verbose output for one package
-go test -count=1 -v ./internal/database/
 ```
 
-Integration tests use a separate `inventory_test` database, created automatically the first
-time the Postgres volume is initialised. Every integration test gets its own temporary schema
-(migrated when needed), so tests never see each other's data and can run in parallel.
-
-| Kind | Where | Needs DB |
-|---|---|---|
+---|---|---|
 | Unit | `internal/**/..._test.go` (for example `auth/service_test.go`, which uses an in-memory fake store) | no |
 | Repository integration | `internal/*/repository_test.go`, `internal/database/migrate_test.go` | yes |
 | End-to-end API | `tests/` | yes |
@@ -411,6 +426,6 @@ docker compose exec postgres psql -U app -d inventory -c "UPDATE users SET role 
 10. ✅ Background workers (reservation expiry)
 11. ✅ Redis (cache and rate limiting)
 12. ✅ Transactional outbox
-13. Test suite hardening
+13. ✅ Test suite hardening
 14. Observability (Prometheus metrics)
 15. Deployment and full documentation

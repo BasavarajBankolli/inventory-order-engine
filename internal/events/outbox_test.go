@@ -75,6 +75,17 @@ func makeDue(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
+func TestLogPublisher(t *testing.T) {
+	e := Event{ID: 1, Type: OrderCreated, AggregateType: AggregateOrder, AggregateID: 7, Payload: []byte(`{"order_id":7}`)}
+
+	if err := (LogPublisher{}).Publish(context.Background(), e); err != nil {
+		t.Errorf("Publish() = %v, want nil", err)
+	}
+	if err := (LogPublisher{FailureRate: 1}).Publish(context.Background(), e); err == nil {
+		t.Error("FailureRate 1: Publish() = nil, want an error")
+	}
+}
+
 func TestBackoff(t *testing.T) {
 	want := map[int]time.Duration{1: 2 * time.Second, 2: 4 * time.Second, 3: 8 * time.Second, 8: 256 * time.Second, 9: 5 * time.Minute, 50: 5 * time.Minute}
 	for attempts, d := range want {

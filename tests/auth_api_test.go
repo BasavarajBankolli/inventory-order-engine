@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -119,6 +120,22 @@ func TestLogin_Errors(t *testing.T) {
 	// Identical code and message: no hint about which emails exist.
 	if wrongPw.Error.Code != "INVALID_CREDENTIALS" || wrongPw.Error.Code != noUser.Error.Code || wrongPw.Error.Message != noUser.Error.Message {
 		t.Errorf("responses differ: %+v vs %+v", wrongPw.Error, noUser.Error)
+	}
+}
+
+// A token stays cryptographically valid after its user is deleted, until it
+// expires. /users/me must notice the user is gone (401), not crash or 500.
+func TestMe_DeletedUser(t *testing.T) {
+	api := newTestAPI(t)
+	token := api.loginAs("gone@example.com", false)
+	if _, err := api.pool.Exec(context.Background(), `DELETE FROM users WHERE email = 'gone@example.com'`); err != nil {
+		t.Fatal(err)
+	}
+
+	var body errorResponse
+	expectStatus(t, api.do("GET", "/api/v1/users/me", nil, token, &body), http.StatusUnauthorized)
+	if body.Error.Message != "user no longer exists" {
+		t.Errorf("message = %q", body.Error.Message)
 	}
 }
 

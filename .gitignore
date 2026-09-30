@@ -13,3 +13,7 @@ coverage.*
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Coverage reports (scripts/test.ps1 -Coverage)
+coverage.out
+coverage.html
