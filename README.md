@@ -6,7 +6,7 @@ It is built to handle concurrent orders correctly and **never oversell stock**.
 This is a learning and portfolio project, so the code favours clarity over cleverness.
 Each module has a matching explanation in [`docs/learning/`](docs/learning/).
 
-> **Status: Stage 5 of 15 — skeleton, authentication, products, inventory, orders (no stock reservation yet).**
+> **Status: Stage 6 of 15 — skeleton, authentication, products, inventory, orders with stock reservations.**
 > This README grows with each stage.
 
 ---
@@ -49,6 +49,26 @@ auth.Handler          auth.Service          users.Repository
 products.Handler      products.Service      products.Repository (+ inventory.Repository, one transaction)
 inventory.Handler     inventory.Service     inventory.Repository   (SELECT ... FOR UPDATE)
 orders.Handler        orders.Service        orders.Repository (+ products.Repository, one transaction)
+                        └─ inventory.Service.ReserveForOrder / ReleaseForOrder (inside the order's transaction)
+```
+
+### Order and reservation flow
+
+```mermaid
+sequenceDiagram
+    participant C as Customer
+    participant O as orders.Service
+    participant I as inventory.Service
+    participant DB as PostgreSQL
+    C->>O: POST /orders
+    O->>DB: BEGIN
+    O->>DB: load products, INSERT order (CREATED) + items
+    O->>I: ReserveForOrder(tx, ...)
+    I->>DB: SELECT inventory FOR UPDATE (by product id)
+    I->>DB: available -= q, reserved += q, INSERT reservation (ACTIVE, expires_at)
+    O->>DB: UPDATE order -> RESERVED
+    O->>DB: COMMIT
+    O-->>C: 201 RESERVED (or 409 OUT_OF_STOCK after ROLLBACK)
 ```
 
 ### Folder layout
@@ -191,7 +211,8 @@ All business endpoints are under `/api/v1`. Request and response details are in
 [docs/learning/02-authentication.md](docs/learning/02-authentication.md) and
 [docs/learning/03-products.md](docs/learning/03-products.md) and
 [docs/learning/04-inventory.md](docs/learning/04-inventory.md) and
-[docs/learning/05-orders.md](docs/learning/05-orders.md). A complete API
+[docs/learning/05-orders.md](docs/learning/05-orders.md) and
+[docs/learning/06-reservations.md](docs/learning/06-reservations.md). A complete API
 reference is added in Stage 15.
 
 | Method | URL | Auth | Description | Errors |
@@ -207,10 +228,10 @@ reference is added in Stage 15.
 | PATCH | `/api/v1/products/{id}` | Admin | Partial update (SKU cannot change) | 400, 401, 403, 404 |
 | DELETE | `/api/v1/products/{id}` | Admin | Archive (soft delete), returns 204 | 400, 401, 403, 404 |
 | GET | `/api/v1/products/{id}/inventory` | Admin | Stock: `available_quantity`, `reserved_quantity`, `version` | 400, 401, 403, 404 |
-| POST | `/api/v1/orders` | Bearer | `{"items":[{"product_id":2,"quantity":3}]}` creates a `CREATED` order | 400, 401, 409 `PRODUCT_UNAVAILABLE` |
+| POST | `/api/v1/orders` | Bearer | `{"items":[{"product_id":2,"quantity":3}]}` reserves stock and returns a `RESERVED` order | 400, 401, 409 `OUT_OF_STOCK` / `PRODUCT_UNAVAILABLE` |
 | GET | `/api/v1/orders` | Bearer | Your orders (admins see all): `status`, `limit`, `offset` | 400, 401 |
 | GET | `/api/v1/orders/{id}` | Bearer | One order with items. Someone else's order returns 404 | 400, 401, 404 |
-| POST | `/api/v1/orders/{id}/cancel` | Bearer | Cancel if the state machine allows it | 404, 409 `INVALID_STATE_TRANSITION` |
+| POST | `/api/v1/orders/{id}/cancel` | Bearer | Cancel if the state machine allows it; reserved stock goes back to available | 404, 409 `INVALID_STATE_TRANSITION` |
 | PATCH | `/api/v1/products/{id}/inventory` | Admin | `{"adjustment": 25}` or `{"available_quantity": 100, "version": 3}` | 400, 404, 409 `INSUFFICIENT_STOCK` / `VERSION_CONFLICT` |
 
 **Money:** `price` is an integer in **minor units** (paise or cents). `"price": 129900, "currency": "INR"`
@@ -286,7 +307,7 @@ docker compose exec postgres psql -U app -d inventory -c "UPDATE users SET role 
 3. ✅ Products
 4. ✅ Inventory
 5. ✅ Orders
-6. Inventory reservations
+6. ✅ Inventory reservations
 7. Transactions and concurrency (100 concurrent buyers, 1 item in stock)
 8. Idempotency keys
 9. Mock payments

@@ -1,9 +1,12 @@
 package inventory
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -97,6 +100,80 @@ func (s *Service) Update(ctx context.Context, productID int64, in UpdateInput) (
 		return nil
 	})
 	return saved, err
+}
+
+// ---------------------------------------------------------------------------
+// Reservations. These run inside the CALLER's transaction (the orders
+// service), so that the order and the stock change commit or roll back
+// together. That is why they take a pgx.Tx instead of starting their own.
+// ---------------------------------------------------------------------------
+
+// ReserveForOrder reserves stock for every line of an order, or fails with
+// ErrOutOfStock. On failure the caller must roll back, which also undoes
+// the lines that were already reserved.
+//
+// LOCK ORDER: rows are locked in ascending product id. If order A locked
+// product 1 then 2 while order B locked 2 then 1, each could end up waiting
+// for the other forever (a deadlock). When every transaction locks in the
+// same global order, that cycle cannot form.
+func (s *Service) ReserveForOrder(ctx context.Context, tx pgx.Tx, orderID int64, lines []ReserveLine, ttl time.Duration) ([]Reservation, error) {
+	sorted := slices.Clone(lines)
+	slices.SortFunc(sorted, func(a, b ReserveLine) int { return cmp.Compare(a.ProductID, b.ProductID) })
+
+	repo := s.repo.WithTx(tx)
+	reservations := make([]Reservation, 0, len(sorted))
+	for _, line := range sorted {
+		inv, err := repo.LockRow(ctx, line.ProductID)
+		if err != nil {
+			return nil, err
+		}
+		if err := inv.Reserve(line.Quantity); err != nil {
+			return nil, err // ErrOutOfStock
+		}
+		if _, err := repo.Save(ctx, inv); err != nil {
+			return nil, err
+		}
+		res, err := repo.CreateReservation(ctx, orderID, line, ttl)
+		if err != nil {
+			return nil, err
+		}
+		reservations = append(reservations, res)
+	}
+	return reservations, nil
+}
+
+// ReleaseForOrder returns the stock of all ACTIVE reservations of an order
+// to available and marks them RELEASED (order cancelled) or EXPIRED (time
+// ran out). It returns how many reservations were released.
+//
+// It is idempotent: a second call finds no ACTIVE reservations and does
+// nothing, so a stock can never be returned twice.
+func (s *Service) ReleaseForOrder(ctx context.Context, tx pgx.Tx, orderID int64, to ReservationStatus) (int, error) {
+	if to != ReservationReleased && to != ReservationExpired {
+		return 0, fmt.Errorf("release: invalid target status %s", to)
+	}
+
+	repo := s.repo.WithTx(tx)
+	active, err := repo.ActiveReservationsForUpdate(ctx, orderID) // sorted by product id
+	if err != nil {
+		return 0, err
+	}
+	for _, res := range active {
+		inv, err := repo.LockRow(ctx, res.ProductID)
+		if err != nil {
+			return 0, err
+		}
+		if err := inv.ReleaseReserved(res.Quantity); err != nil {
+			return 0, err
+		}
+		if _, err := repo.Save(ctx, inv); err != nil {
+			return 0, err
+		}
+		if err := repo.FinishReservation(ctx, res.ID, to); err != nil {
+			return 0, err
+		}
+	}
+	return len(active), nil
 }
 
 func validateUpdate(in UpdateInput) error {

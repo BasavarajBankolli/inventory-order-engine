@@ -28,6 +28,7 @@ const (
 	CodeInsufficientStock  = "INSUFFICIENT_STOCK"
 	CodeVersionConflict    = "VERSION_CONFLICT"
 	CodeProductUnavailable = "PRODUCT_UNAVAILABLE"
+	CodeOutOfStock         = "OUT_OF_STOCK"
 	CodeInvalidTransition  = "INVALID_STATE_TRANSITION"
 	CodeInternal           = "INTERNAL_ERROR"
 )

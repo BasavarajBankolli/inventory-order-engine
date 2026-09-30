@@ -7,6 +7,7 @@ import (
 
 	"inventory-order-engine/internal/httpx"
 	"inventory-order-engine/internal/identity"
+	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/validate"
 )
 
@@ -147,6 +148,10 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, ErrProductUnavailable):
 		// err's text is built by us ("...: product 7"), so it is safe to show.
 		httpx.WriteError(w, r, http.StatusConflict, httpx.CodeProductUnavailable, err.Error())
+	case errors.Is(err, inventory.ErrOutOfStock):
+		// The message names the product and quantities; it contains only
+		// numbers we computed, so it is safe to return.
+		httpx.WriteError(w, r, http.StatusConflict, httpx.CodeOutOfStock, err.Error())
 	case errors.Is(err, ErrInvalidTransition):
 		httpx.WriteError(w, r, http.StatusConflict, httpx.CodeInvalidTransition, err.Error())
 	default:

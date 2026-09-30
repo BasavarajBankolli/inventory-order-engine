@@ -42,6 +42,10 @@ type Config struct {
 
 	// JWTTTL is how long an access token stays valid after login.
 	JWTTTL time.Duration
+
+	// ReservationTTL is how long stock stays reserved for an unpaid order
+	// before the expiry worker (Stage 10) may release it.
+	ReservationTTL time.Duration
 }
 
 // minJWTSecretLen: HMAC-SHA256 keys shorter than 32 bytes (256 bits) are
@@ -59,6 +63,7 @@ func Load() (Config, error) {
 		ShutdownTimeout: 10 * time.Second,
 		JWTSecret:       os.Getenv("JWT_SECRET"),
 		JWTTTL:          time.Hour,
+		ReservationTTL:  15 * time.Minute,
 	}
 
 	// Required values: there is no safe default for a database password.
@@ -88,6 +93,14 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("SHUTDOWN_TIMEOUT must be a positive duration like 10s, got %q", v)
 		}
 		cfg.ShutdownTimeout = d
+	}
+
+	if v := os.Getenv("RESERVATION_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Second {
+			return Config{}, fmt.Errorf("RESERVATION_TTL must be a duration of at least 1s like 15m, got %q", v)
+		}
+		cfg.ReservationTTL = d
 	}
 
 	return cfg, nil

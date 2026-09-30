@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"inventory-order-engine/internal/database"
 	"inventory-order-engine/internal/identity"
+	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/products"
 	"inventory-order-engine/internal/validate"
 )
@@ -21,30 +23,41 @@ const (
 
 // Service holds the order use cases and owns their transactions.
 type Service struct {
-	pool     *pgxpool.Pool
-	orders   *Repository
-	products *products.Repository
+	pool      *pgxpool.Pool
+	orders    *Repository
+	products  *products.Repository
+	inventory *inventory.Service
+
+	// reservationTTL is how long reserved stock is held for an unpaid order.
+	reservationTTL time.Duration
 }
 
 // NewService creates an orders Service.
-func NewService(pool *pgxpool.Pool, orders *Repository, prods *products.Repository) *Service {
-	return &Service{pool: pool, orders: orders, products: prods}
+func NewService(pool *pgxpool.Pool, orders *Repository, prods *products.Repository,
+	inv *inventory.Service, reservationTTL time.Duration) *Service {
+	return &Service{pool: pool, orders: orders, products: prods, inventory: inv, reservationTTL: reservationTTL}
 }
 
-// Create places an order for the caller.
+// Create places an order for the caller and reserves its stock.
 //
-//	validate request shape                      (no DB)
+//	validate request shape                       (no DB)
 //	BEGIN
-//	  load the requested products               (current price + status)
-//	  buildItems: check + price snapshot + total (pure Go)
+//	  load the requested products                (current price + status)
+//	  buildItems: check + price snapshot + total  (pure Go)
 //	  INSERT order (CREATED) + INSERT items
+//	  reserve stock: lock inventory rows (by product id),
+//	    available -= qty, reserved += qty,
+//	    INSERT reservations (ACTIVE, expires_at)  -> ErrOutOfStock = ROLLBACK
+//	  CREATED -> RESERVED                        (state machine)
 //	COMMIT
+//
+// Everything is one transaction: either the order exists AND its stock is
+// reserved, or nothing happened at all. There is never an order without a
+// reservation, nor a reservation without an order.
 //
 // Reading the products INSIDE the transaction means the price stored in the
 // order is the price at the moment of ordering, and an archived/inactive
 // product is rejected even if it was active when the client loaded the page.
-//
-// Stage 6 adds "reserve inventory" to this same transaction.
 func (s *Service) Create(ctx context.Context, caller identity.Principal, requested []ItemRequest) (Order, error) {
 	if err := validateItems(requested); err != nil {
 		return Order{}, err
@@ -70,23 +83,51 @@ func (s *Service) Create(ctx context.Context, caller identity.Principal, request
 			return err
 		}
 
-		created, err = s.orders.WithTx(tx).Create(ctx, Order{
+		repo := s.orders.WithTx(tx)
+		created, err = repo.Create(ctx, Order{
 			UserID:      caller.UserID,
 			Status:      StatusCreated,
 			TotalAmount: total,
 			Currency:    currency,
 			Items:       items,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+
+		lines := make([]inventory.ReserveLine, len(items))
+		for i, it := range items {
+			lines[i] = inventory.ReserveLine{ProductID: it.ProductID, Quantity: it.Quantity}
+		}
+		if _, err := s.inventory.ReserveForOrder(ctx, tx, created.ID, lines, s.reservationTTL); err != nil {
+			return err // ErrOutOfStock -> the order insert above is rolled back too
+		}
+
+		return s.transition(ctx, repo, &created, StatusReserved)
 	})
 	if err != nil {
 		return Order{}, err
 	}
 
-	slog.InfoContext(ctx, "order created",
+	slog.InfoContext(ctx, "order created and stock reserved",
 		"order_id", created.ID, "total_amount", created.TotalAmount,
 		"currency", created.Currency, "items", len(created.Items))
 	return created, nil
+}
+
+// transition applies a state machine move to o and saves it. Items are kept.
+func (s *Service) transition(ctx context.Context, repo *Repository, o *Order, to Status) error {
+	from := o.Status
+	if err := o.TransitionTo(to); err != nil {
+		return err
+	}
+	saved, err := repo.UpdateStatus(ctx, o.ID, from, to)
+	if err != nil {
+		return err
+	}
+	saved.Items = o.Items
+	*o = saved
+	return nil
 }
 
 // Get returns one order with its items.
@@ -146,18 +187,24 @@ func (s *Service) List(ctx context.Context, caller identity.Principal, in ListIn
 	return ListResult{Items: list, Total: total, Limit: in.Limit, Offset: in.Offset}, nil
 }
 
-// Cancel moves an order to CANCELLED if the state machine allows it.
+// Cancel moves an order to CANCELLED and returns its reserved stock.
 //
 //	BEGIN
-//	  SELECT order FOR UPDATE    two concurrent cancels (or cancel + payment)
+//	  SELECT order FOR UPDATE    two concurrent cancels (or cancel + expiry)
 //	                             cannot both act on the same old status
 //	  TransitionTo(CANCELLED)    the state machine decides
 //	  UPDATE status
+//	  release ACTIVE reservations: reserved -= qty, available += qty,
+//	    reservation -> RELEASED
 //	COMMIT
 //
-// Stage 6 adds "release the reserved stock" to this same transaction.
+// Lock order is always: order row first, then inventory rows by product id
+// (the same order Create uses), so cancel and create cannot deadlock.
 func (s *Service) Cancel(ctx context.Context, caller identity.Principal, id int64) (Order, error) {
-	var updated Order
+	var (
+		updated  Order
+		released int
+	)
 	err := database.WithTx(ctx, s.pool, func(tx pgx.Tx) error {
 		repo := s.orders.WithTx(tx)
 
@@ -169,15 +216,18 @@ func (s *Service) Cancel(ctx context.Context, caller identity.Principal, id int6
 			return ErrNotFound
 		}
 
-		from := o.Status
-		if err := o.TransitionTo(StatusCancelled); err != nil {
+		if err := s.transition(ctx, repo, &o, StatusCancelled); err != nil {
 			return err
 		}
 
-		updated, err = repo.UpdateStatus(ctx, o.ID, from, o.Status)
+		// Orders created before Stage 6 have no reservations; releasing
+		// then simply does nothing.
+		released, err = s.inventory.ReleaseForOrder(ctx, tx, o.ID, inventory.ReservationReleased)
 		if err != nil {
 			return err
 		}
+
+		updated = o
 		updated.Items, err = repo.items(ctx, o.ID)
 		return err
 	})
@@ -185,7 +235,7 @@ func (s *Service) Cancel(ctx context.Context, caller identity.Principal, id int6
 		return Order{}, err
 	}
 
-	slog.InfoContext(ctx, "order cancelled", "order_id", updated.ID)
+	slog.InfoContext(ctx, "order cancelled", "order_id", updated.ID, "reservations_released", released)
 	return updated, nil
 }
 

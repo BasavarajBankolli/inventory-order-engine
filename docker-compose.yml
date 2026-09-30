@@ -52,6 +52,7 @@ services:
       # Real deployments must inject a long random secret (never commit it).
       JWT_SECRET: ${JWT_SECRET:-local-dev-only-jwt-secret-change-me-0123456789}
       JWT_TTL: ${JWT_TTL:-1h}
+      RESERVATION_TTL: ${RESERVATION_TTL:-15m}
     ports:
       - "${API_PORT:-8080}:8080"
     depends_on:

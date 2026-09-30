@@ -39,13 +39,13 @@ func TestOrders_CreateGetListCancel(t *testing.T) {
 	api := newTestAPI(t)
 	admin := api.loginAs("admin@example.com", true)
 	alice := api.loginAs("alice@example.com", false)
-	kb := api.createProduct(admin, "KB-1", 249900)
-	mug := api.createProduct(admin, "MUG-1", 29900)
+	kb := api.createStockedProduct(admin, "KB-1", 249900, 10)
+	mug := api.createStockedProduct(admin, "MUG-1", 29900, 10)
 
 	var o orderResponse
 	resp := api.do("POST", "/api/v1/orders", orderBody([2]int64{kb, 1}, [2]int64{mug, 2}), alice, &o)
 	expectStatus(t, resp, http.StatusCreated)
-	if o.Status != "CREATED" || o.TotalAmount != 249900+2*29900 || len(o.Items) != 2 || o.Items[1].TotalPrice != 59800 {
+	if o.Status != "RESERVED" || o.TotalAmount != 249900+2*29900 || len(o.Items) != 2 || o.Items[1].TotalPrice != 59800 {
 		t.Fatalf("created order = %+v", o)
 	}
 	path := "/api/v1/orders/" + strconv.FormatInt(o.ID, 10)
@@ -83,7 +83,7 @@ func TestOrders_OwnershipAndAuth(t *testing.T) {
 	admin := api.loginAs("admin@example.com", true)
 	alice := api.loginAs("alice@example.com", false)
 	bob := api.loginAs("bob@example.com", false)
-	p := api.createProduct(admin, "P-1", 1000)
+	p := api.createStockedProduct(admin, "P-1", 1000, 10)
 
 	var o orderResponse
 	expectStatus(t, api.do("POST", "/api/v1/orders", orderBody([2]int64{p, 1}), alice, &o), http.StatusCreated)
@@ -110,7 +110,7 @@ func TestOrders_Errors(t *testing.T) {
 	api := newTestAPI(t)
 	admin := api.loginAs("admin@example.com", true)
 	alice := api.loginAs("alice@example.com", false)
-	active := api.createProduct(admin, "ON-1", 1000)
+	active := api.createStockedProduct(admin, "ON-1", 1000, 10)
 	inactive := api.createProduct(admin, "OFF-1", 1000)
 	api.do("PATCH", "/api/v1/products/"+strconv.FormatInt(inactive, 10), map[string]any{"status": "INACTIVE"}, admin, nil)
 
@@ -146,4 +146,33 @@ func TestOrders_Errors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOrders_ReserveAndRelease(t *testing.T) {
+	api := newTestAPI(t)
+	admin := api.loginAs("admin@example.com", true)
+	alice := api.loginAs("alice@example.com", false)
+	bob := api.loginAs("bob@example.com", false)
+	p := api.createStockedProduct(admin, "LAST-1", 1000, 2)
+
+	// Alice takes both units: they move from available to reserved.
+	var o orderResponse
+	expectStatus(t, api.do("POST", "/api/v1/orders", orderBody([2]int64{p, 2}), alice, &o), http.StatusCreated)
+	if inv := api.stockOf(admin, p); inv.AvailableQuantity != 0 || inv.ReservedQuantity != 2 {
+		t.Fatalf("after order: %+v, want 0 available / 2 reserved", inv)
+	}
+
+	// Bob is out of luck.
+	var oos errorResponse
+	expectStatus(t, api.do("POST", "/api/v1/orders", orderBody([2]int64{p, 1}), bob, &oos), http.StatusConflict)
+	if oos.Error.Code != "OUT_OF_STOCK" {
+		t.Errorf("code = %q, want OUT_OF_STOCK", oos.Error.Code)
+	}
+
+	// Alice cancels: the units come back and Bob can buy one.
+	expectStatus(t, api.do("POST", "/api/v1/orders/"+strconv.FormatInt(o.ID, 10)+"/cancel", nil, alice, nil), http.StatusOK)
+	if inv := api.stockOf(admin, p); inv.AvailableQuantity != 2 || inv.ReservedQuantity != 0 {
+		t.Fatalf("after cancel: %+v, want 2 available / 0 reserved", inv)
+	}
+	expectStatus(t, api.do("POST", "/api/v1/orders", orderBody([2]int64{p, 1}), bob, nil), http.StatusCreated)
 }

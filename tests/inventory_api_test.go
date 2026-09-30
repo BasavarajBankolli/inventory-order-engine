@@ -23,6 +23,25 @@ func (a *testAPI) createProduct(adminToken, sku string, price int64) int64 {
 	return p.ID
 }
 
+// createStockedProduct creates a product and restocks it with qty units.
+func (a *testAPI) createStockedProduct(adminToken, sku string, price int64, qty int) int64 {
+	a.t.Helper()
+	id := a.createProduct(adminToken, sku, price)
+	resp := a.do("PATCH", "/api/v1/products/"+strconv.FormatInt(id, 10)+"/inventory",
+		map[string]any{"adjustment": qty}, adminToken, nil)
+	expectStatus(a.t, resp, http.StatusOK)
+	return id
+}
+
+// stockOf reads a product's inventory through the admin API.
+func (a *testAPI) stockOf(adminToken string, productID int64) inventoryResponse {
+	a.t.Helper()
+	var inv inventoryResponse
+	resp := a.do("GET", "/api/v1/products/"+strconv.FormatInt(productID, 10)+"/inventory", nil, adminToken, &inv)
+	expectStatus(a.t, resp, http.StatusOK)
+	return inv
+}
+
 func TestInventory_CreatedWithProductAndAdjustable(t *testing.T) {
 	api := newTestAPI(t)
 	admin := api.loginAs("admin@example.com", true)

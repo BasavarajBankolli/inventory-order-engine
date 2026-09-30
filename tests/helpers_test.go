@@ -37,8 +37,9 @@ func newTestAPI(t *testing.T) *testAPI {
 	pool := testutil.NewMigratedPool(t)
 
 	cfg := config.Config{
-		JWTSecret: "api-test-secret-that-is-at-least-32-bytes",
-		JWTTTL:    time.Hour,
+		JWTSecret:      "api-test-secret-that-is-at-least-32-bytes",
+		JWTTTL:         time.Hour,
+		ReservationTTL: 15 * time.Minute,
 	}
 	handler, err := app.NewHandler(cfg, pool, logging.New(io.Discard, slog.LevelInfo),
 		app.Options{BcryptCost: bcrypt.MinCost})

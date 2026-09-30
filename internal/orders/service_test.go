@@ -5,10 +5,12 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"inventory-order-engine/internal/identity"
+	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/orders"
 	"inventory-order-engine/internal/products"
 	"inventory-order-engine/internal/testutil"
@@ -30,7 +32,8 @@ func setup(t *testing.T) fixture {
 	pool := testutil.NewMigratedPool(t)
 	f := fixture{
 		pool: pool,
-		svc:  orders.NewService(pool, orders.NewRepository(pool), products.NewRepository(pool)),
+		svc: orders.NewService(pool, orders.NewRepository(pool), products.NewRepository(pool),
+			inventory.NewService(pool, inventory.NewRepository(pool)), 15*time.Minute),
 	}
 	f.alice = identity.Principal{UserID: f.user(t, "alice@x.com"), Role: identity.RoleCustomer}
 	f.bob = identity.Principal{UserID: f.user(t, "bob@x.com"), Role: identity.RoleCustomer}
@@ -48,12 +51,23 @@ func (f fixture) user(t *testing.T, email string) int64 {
 	return id
 }
 
+// product inserts a product plus its inventory row with 100 units available.
 func (f fixture) product(t *testing.T, sku string, price int64, currency, status string) int64 {
 	t.Helper()
+	return f.productWithStock(t, sku, price, currency, status, 100)
+}
+
+func (f fixture) productWithStock(t *testing.T, sku string, price int64, currency, status string, stock int) int64 {
+	t.Helper()
+	ctx := context.Background()
 	var id int64
-	if err := f.pool.QueryRow(context.Background(),
+	if err := f.pool.QueryRow(ctx,
 		`INSERT INTO products (sku, name, price, currency, status) VALUES ($1, 'P', $2, $3, $4) RETURNING id`,
 		sku, price, currency, status).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO inventory (product_id, available_quantity) VALUES ($1, $2)`, id, stock); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -79,7 +93,7 @@ func TestCreate_PersistsOrderItemsAndPriceSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if o.Status != orders.StatusCreated || o.UserID != f.alice.UserID || o.TotalAmount != 249900+4*29900 || o.Currency != "INR" {
+	if o.Status != orders.StatusReserved || o.UserID != f.alice.UserID || o.TotalAmount != 249900+4*29900 || o.Currency != "INR" {
 		t.Errorf("order = %+v", o)
 	}
 

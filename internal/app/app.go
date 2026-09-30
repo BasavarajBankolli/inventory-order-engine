@@ -49,7 +49,7 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts
 	}
 	productService := products.NewService(pool, productRepo, inventoryRepo)
 	inventoryService := inventory.NewService(pool, inventoryRepo)
-	orderService := orders.NewService(pool, orderRepo, productRepo)
+	orderService := orders.NewService(pool, orderRepo, productRepo, inventoryService, cfg.ReservationTTL)
 
 	// Handlers (HTTP)
 	return server.NewRouter(server.Deps{
