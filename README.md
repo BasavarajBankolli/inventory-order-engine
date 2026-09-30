@@ -6,7 +6,7 @@ It is built to handle concurrent orders correctly and **never oversell stock**.
 This is a learning and portfolio project, so the code favours clarity over cleverness.
 Each module has a matching explanation in [`docs/learning/`](docs/learning/).
 
-> **Status: Stage 4 of 15 — skeleton, authentication, products, inventory.**
+> **Status: Stage 5 of 15 — skeleton, authentication, products, inventory, orders (no stock reservation yet).**
 > This README grows with each stage.
 
 ---
@@ -36,6 +36,7 @@ flowchart LR
     router --> pub[/auth/register, /auth/login/]
     router --> pubp[/GET products/]
     router --> ra[RequireAuth] --> me[/users/me/]
+    ra --> ord[/orders: create, list, get, cancel/]
     ra --> rr[RequireRole ADMIN] --> adm[/POST, PATCH, DELETE products/]
     rr --> inv[/GET, PATCH products/id/inventory/]
 ```
@@ -47,6 +48,7 @@ HTTP handler      ->  service (rules)   ->  repository (SQL)    ->  PostgreSQL
 auth.Handler          auth.Service          users.Repository
 products.Handler      products.Service      products.Repository (+ inventory.Repository, one transaction)
 inventory.Handler     inventory.Service     inventory.Repository   (SELECT ... FOR UPDATE)
+orders.Handler        orders.Service        orders.Repository (+ products.Repository, one transaction)
 ```
 
 ### Folder layout
@@ -66,6 +68,7 @@ internal/
   identity/            Principal (user id + role) of the authenticated caller, in context
   logging/             Structured JSON logger (log/slog) that adds request_id automatically
   middleware/          RequestID, Logger, Recoverer
+  orders/              Orders + items, price snapshot, totals, state machine, ownership, cancel
   products/            Product catalogue: validation, soft delete, list/search/sort/paginate
   requestid/           Stores and reads the request ID in context.Context
   server/              Router: maps URLs to handlers
@@ -78,7 +81,7 @@ docs/learning/         Beginner-friendly explanations for every module
 tests/                 End-to-end API tests (HTTP -> router -> services -> PostgreSQL)
 ```
 
-Packages such as `orders/`, `payments/`, `events/`, `worker/`,
+Packages such as `payments/`, `events/`, `worker/`,
 and `cache/` are added in later stages. There is no `pkg/` folder, because
 nothing here is meant to be imported by other projects.
 
@@ -187,7 +190,8 @@ time the Postgres volume is initialised. Every integration test gets its own tem
 All business endpoints are under `/api/v1`. Request and response details are in
 [docs/learning/02-authentication.md](docs/learning/02-authentication.md) and
 [docs/learning/03-products.md](docs/learning/03-products.md) and
-[docs/learning/04-inventory.md](docs/learning/04-inventory.md). A complete API
+[docs/learning/04-inventory.md](docs/learning/04-inventory.md) and
+[docs/learning/05-orders.md](docs/learning/05-orders.md). A complete API
 reference is added in Stage 15.
 
 | Method | URL | Auth | Description | Errors |
@@ -203,6 +207,10 @@ reference is added in Stage 15.
 | PATCH | `/api/v1/products/{id}` | Admin | Partial update (SKU cannot change) | 400, 401, 403, 404 |
 | DELETE | `/api/v1/products/{id}` | Admin | Archive (soft delete), returns 204 | 400, 401, 403, 404 |
 | GET | `/api/v1/products/{id}/inventory` | Admin | Stock: `available_quantity`, `reserved_quantity`, `version` | 400, 401, 403, 404 |
+| POST | `/api/v1/orders` | Bearer | `{"items":[{"product_id":2,"quantity":3}]}` creates a `CREATED` order | 400, 401, 409 `PRODUCT_UNAVAILABLE` |
+| GET | `/api/v1/orders` | Bearer | Your orders (admins see all): `status`, `limit`, `offset` | 400, 401 |
+| GET | `/api/v1/orders/{id}` | Bearer | One order with items. Someone else's order returns 404 | 400, 401, 404 |
+| POST | `/api/v1/orders/{id}/cancel` | Bearer | Cancel if the state machine allows it | 404, 409 `INVALID_STATE_TRANSITION` |
 | PATCH | `/api/v1/products/{id}/inventory` | Admin | `{"adjustment": 25}` or `{"available_quantity": 100, "version": 3}` | 400, 404, 409 `INSUFFICIENT_STOCK` / `VERSION_CONFLICT` |
 
 **Money:** `price` is an integer in **minor units** (paise or cents). `"price": 129900, "currency": "INR"`
@@ -247,6 +255,12 @@ Invoke-WebRequest -Method Delete -Uri "$base/products/1" -Headers $headers -UseB
 Invoke-RestMethod -Uri "$base/products/2/inventory" -Headers $headers
 Invoke-RestMethod -Method Patch -Uri "$base/products/2/inventory" -Headers $headers -ContentType "application/json" -Body '{"adjustment": 50}'
 Invoke-RestMethod -Method Patch -Uri "$base/products/2/inventory" -Headers $headers -ContentType "application/json" -Body '{"available_quantity": 45, "version": 2}'
+
+# 6. Orders (any logged-in user)
+$order = Invoke-RestMethod -Method Post -Uri "$base/orders" -Headers $headers -ContentType "application/json" `
+  -Body '{"items":[{"product_id":2,"quantity":2}]}'
+Invoke-RestMethod -Uri "$base/orders" -Headers $headers
+Invoke-RestMethod -Method Post -Uri "$base/orders/$($order.id)/cancel" -Headers $headers
 ```
 
 > In Windows PowerShell, `curl` is an alias for `Invoke-WebRequest`. If you use real curl, type
@@ -271,7 +285,7 @@ docker compose exec postgres psql -U app -d inventory -c "UPDATE users SET role 
 2. ✅ Authentication (register, login, JWT, roles)
 3. ✅ Products
 4. ✅ Inventory
-5. Orders
+5. ✅ Orders
 6. Inventory reservations
 7. Transactions and concurrency (100 concurrent buyers, 1 item in stock)
 8. Idempotency keys

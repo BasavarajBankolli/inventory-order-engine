@@ -16,6 +16,7 @@ import (
 	"inventory-order-engine/internal/config"
 	"inventory-order-engine/internal/health"
 	"inventory-order-engine/internal/inventory"
+	"inventory-order-engine/internal/orders"
 	"inventory-order-engine/internal/products"
 	"inventory-order-engine/internal/server"
 	"inventory-order-engine/internal/users"
@@ -38,6 +39,7 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts
 	userRepo := users.NewRepository(pool)
 	productRepo := products.NewRepository(pool)
 	inventoryRepo := inventory.NewRepository(pool)
+	orderRepo := orders.NewRepository(pool)
 
 	// Services (business logic)
 	tokens := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTTTL)
@@ -47,6 +49,7 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts
 	}
 	productService := products.NewService(pool, productRepo, inventoryRepo)
 	inventoryService := inventory.NewService(pool, inventoryRepo)
+	orderService := orders.NewService(pool, orderRepo, productRepo)
 
 	// Handlers (HTTP)
 	return server.NewRouter(server.Deps{
@@ -58,6 +61,7 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts
 		Users:       users.NewHandler(userRepo),
 		Products:    products.NewHandler(productService),
 		Inventory:   inventory.NewHandler(inventoryService),
+		Orders:      orders.NewHandler(orderService),
 		RequireAuth: auth.RequireAuth(tokens),
 	}), nil
 }

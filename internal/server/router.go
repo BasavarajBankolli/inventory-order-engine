@@ -17,12 +17,13 @@ import (
 	"inventory-order-engine/internal/identity"
 	"inventory-order-engine/internal/inventory"
 	"inventory-order-engine/internal/middleware"
+	"inventory-order-engine/internal/orders"
 	"inventory-order-engine/internal/products"
 	"inventory-order-engine/internal/users"
 )
 
-// Deps lists everything the router needs. New modules (orders, ...) add
-// their handlers here in later stages.
+// Deps lists everything the router needs. New modules add their handlers
+// here in later stages.
 type Deps struct {
 	Logger    *slog.Logger
 	Health    *health.Handler
@@ -30,6 +31,7 @@ type Deps struct {
 	Users     *users.Handler
 	Products  *products.Handler
 	Inventory *inventory.Handler
+	Orders    *orders.Handler
 
 	// RequireAuth is the middleware that rejects requests without a valid
 	// access token.
@@ -69,6 +71,13 @@ func NewRouter(d Deps) http.Handler {
 			r.Use(d.RequireAuth)
 
 			r.Get("/users/me", d.Users.Me)
+
+			// Orders: customers see only their own, admins see all
+			// (enforced in orders.Service, not here).
+			r.Post("/orders", d.Orders.Create)
+			r.Get("/orders", d.Orders.List)
+			r.Get("/orders/{id}", d.Orders.Get)
+			r.Post("/orders/{id}/cancel", d.Orders.Cancel)
 
 			// Admin only: RequireRole runs after RequireAuth, so it can
 			// read the caller's role from the context.

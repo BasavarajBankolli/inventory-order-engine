@@ -27,6 +27,8 @@ const (
 	CodeSKUTaken           = "SKU_ALREADY_EXISTS"
 	CodeInsufficientStock  = "INSUFFICIENT_STOCK"
 	CodeVersionConflict    = "VERSION_CONFLICT"
+	CodeProductUnavailable = "PRODUCT_UNAVAILABLE"
+	CodeInvalidTransition  = "INVALID_STATE_TRANSITION"
 	CodeInternal           = "INTERNAL_ERROR"
 )
 
@@ -49,7 +51,11 @@ type ErrorDetail struct {
 func WriteJSON(w http.ResponseWriter, r *http.Request, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
+	enc := json.NewEncoder(w)
+	// By default Go escapes <, > and & as < etc. (useful when JSON is
+	// embedded in HTML). This is a JSON API, so keep the text readable.
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
 		// The status line is already sent, so we cannot change the response.
 		// The best we can do is record the problem.
 		slog.ErrorContext(r.Context(), "failed to write JSON response", "error", err)
