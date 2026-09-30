@@ -77,16 +77,29 @@ func (r *Repository) GetByID(ctx context.Context, id int64) (Product, error) {
 	return oneProduct(row)
 }
 
-// GetByIDs returns the products with the given ids, in ANY status
+// GetByIDsForShare returns the products with the given ids, in ANY status
 // (including ARCHIVED), so callers such as order creation can tell "does not
 // exist" apart from "exists but is not for sale". Missing ids are simply
 // absent from the result.
-func (r *Repository) GetByIDs(ctx context.Context, ids []int64) ([]Product, error) {
-	// = ANY($1) with a Go slice: pgx sends it as one PostgreSQL array
-	// parameter, so the SQL stays the same no matter how many ids there are.
-	rows, err := r.db.Query(ctx, `SELECT `+productColumns+` FROM products WHERE id = ANY($1)`, ids)
+//
+// "= ANY($1)" with a Go slice: pgx sends it as one PostgreSQL array
+// parameter, so the SQL stays the same no matter how many ids there are.
+//
+// Every returned row also gets a SHARED lock, held until the transaction
+// ends, so this must run inside a transaction:
+//
+//	FOR SHARE   many transactions can hold it on the same row at once
+//	            (100 concurrent orders for one product do not block each other)
+//	FOR UPDATE  exclusive: waits for, and blocks, every other lock
+//	UPDATE      needs an exclusive lock, so it WAITS for all shared locks
+//
+// Order creation uses it so that an admin cannot archive or re-price a
+// product between "order read the product" and "order committed": the
+// admin's UPDATE simply waits until the order transaction finishes.
+func (r *Repository) GetByIDsForShare(ctx context.Context, ids []int64) ([]Product, error) {
+	rows, err := r.db.Query(ctx, `SELECT `+productColumns+` FROM products WHERE id = ANY($1) FOR SHARE`, ids)
 	if err != nil {
-		return nil, fmt.Errorf("select products by ids: %w", err)
+		return nil, fmt.Errorf("select products for share: %w", err)
 	}
 	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Product, error) {
 		return scanProduct(row)

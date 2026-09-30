@@ -6,7 +6,7 @@ It is built to handle concurrent orders correctly and **never oversell stock**.
 This is a learning and portfolio project, so the code favours clarity over cleverness.
 Each module has a matching explanation in [`docs/learning/`](docs/learning/).
 
-> **Status: Stage 6 of 15 — skeleton, authentication, products, inventory, orders with stock reservations.**
+> **Status: Stage 7 of 15 — orders with stock reservations, proven safe under concurrency (never oversells).**
 > This README grows with each stage.
 
 ---
@@ -71,11 +71,30 @@ sequenceDiagram
     O-->>C: 201 RESERVED (or 409 OUT_OF_STOCK after ROLLBACK)
 ```
 
+### Concurrency: never oversell
+
+| Mechanism | What it prevents |
+|---|---|
+| One transaction per use case (`database.WithTx`) | Half-finished orders; an order row without its reservation |
+| `SELECT ... FOR UPDATE` on the inventory row | Two buyers both "seeing" the last unit (check-then-act race) |
+| Locks always taken in product-id order | Deadlocks between multi-item orders |
+| `SELECT ... FOR SHARE` on products | A product archived or re-priced in the middle of a checkout |
+| `CHECK (available_quantity >= 0)` | A future bug *storing* negative stock |
+
+Proof: `go test -race -count=20 -run Concurrency ./internal/orders/`, plus the live demo:
+
+```powershell
+go run ./cmd/concurrency-demo            # 100 buyers, stock 1 -> 1 x 201, 99 x 409 OUT_OF_STOCK
+```
+
+Details: [docs/learning/07-transactions-and-concurrency.md](docs/learning/07-transactions-and-concurrency.md).
+
 ### Folder layout
 
 ```text
 cmd/
   api/main.go          Starts the HTTP server (wiring only, no business logic)
+  concurrency-demo/    Fires N simultaneous orders at the running API and reports the outcome
   migrate/main.go      Applies pending SQL migrations, then exits
 internal/
   app/                 Builds every module and connects them (used by main and API tests)
@@ -308,7 +327,7 @@ docker compose exec postgres psql -U app -d inventory -c "UPDATE users SET role 
 4. ✅ Inventory
 5. ✅ Orders
 6. ✅ Inventory reservations
-7. Transactions and concurrency (100 concurrent buyers, 1 item in stock)
+7. ✅ Transactions and concurrency (100 concurrent buyers, 1 item in stock)
 8. Idempotency keys
 9. Mock payments
 10. Background workers (reservation expiry)

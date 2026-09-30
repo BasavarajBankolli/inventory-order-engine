@@ -69,7 +69,9 @@ func (s *Service) Create(ctx context.Context, caller identity.Principal, request
 		for i, it := range requested {
 			ids[i] = it.ProductID
 		}
-		found, err := s.products.WithTx(tx).GetByIDs(ctx, ids)
+		// FOR SHARE: the products cannot be archived or re-priced until we
+		// commit, so the snapshot we store is still true at commit time.
+		found, err := s.products.WithTx(tx).GetByIDsForShare(ctx, ids)
 		if err != nil {
 			return err
 		}
