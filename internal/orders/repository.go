@@ -35,17 +35,29 @@ func scanOrder(row pgx.Row) (Order, error) {
 
 // Create inserts the order and all its items. It must run inside a
 // transaction (WithTx) so that an order never exists without its items.
+//
+// If another order of the same user already has this idempotency key,
+// PostgreSQL's unique index rejects the INSERT and we return
+// errDuplicateIdempotencyKey. If that other order's transaction is still
+// running, PostgreSQL first WAITS for it to finish: only if it commits is
+// our INSERT a duplicate; if it rolls back, our INSERT succeeds.
 func (r *Repository) Create(ctx context.Context, o Order) (Order, error) {
+	// NULLIF('', '') = NULL: orders without a key store NULL, which the
+	// partial unique index ignores.
 	row := r.db.QueryRow(ctx, `
-		INSERT INTO orders (user_id, status, total_amount, currency)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO orders (user_id, status, total_amount, currency, idempotency_key, request_hash)
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''))
 		RETURNING `+orderColumns,
-		o.UserID, o.Status, o.TotalAmount, o.Currency,
+		o.UserID, o.Status, o.TotalAmount, o.Currency, o.idempotencyKey, o.requestHash,
 	)
 	created, err := scanOrder(row)
+	if database.IsUniqueViolation(err, "orders_user_idempotency_key_idx") {
+		return Order{}, errDuplicateIdempotencyKey
+	}
 	if err != nil {
 		return Order{}, fmt.Errorf("insert order: %w", err)
 	}
+	created.idempotencyKey, created.requestHash = o.idempotencyKey, o.requestHash
 
 	// One INSERT per item keeps the code obvious. An order has at most 50
 	// items, so the extra round trips do not matter here.
@@ -70,6 +82,28 @@ func (r *Repository) GetByID(ctx context.Context, id int64) (Order, error) {
 		return Order{}, err
 	}
 	o.Items, err = r.items(ctx, id)
+	return o, err
+}
+
+// GetByIdempotencyKey finds the user's order that was created with key,
+// including its items and the stored request fingerprint.
+func (r *Repository) GetByIdempotencyKey(ctx context.Context, userID int64, key string) (Order, error) {
+	var hash string
+	row := r.db.QueryRow(ctx, `
+		SELECT `+orderColumns+`, request_hash
+		FROM orders
+		WHERE user_id = $1 AND idempotency_key = $2`, userID, key)
+	var o Order
+	err := row.Scan(&o.ID, &o.UserID, &o.Status, &o.TotalAmount, &o.Currency, &o.CreatedAt, &o.UpdatedAt, &hash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Order{}, ErrNotFound
+	}
+	if err != nil {
+		return Order{}, fmt.Errorf("select order by idempotency key: %w", err)
+	}
+	o.idempotencyKey, o.requestHash = key, hash
+
+	o.Items, err = r.items(ctx, o.ID)
 	return o, err
 }
 

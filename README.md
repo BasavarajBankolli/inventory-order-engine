@@ -6,7 +6,7 @@ It is built to handle concurrent orders correctly and **never oversell stock**.
 This is a learning and portfolio project, so the code favours clarity over cleverness.
 Each module has a matching explanation in [`docs/learning/`](docs/learning/).
 
-> **Status: Stage 7 of 15 — orders with stock reservations, proven safe under concurrency (never oversells).**
+> **Status: Stage 8 of 15 — orders with stock reservations, safe under concurrency, idempotent retries.**
 > This README grows with each stage.
 
 ---
@@ -88,6 +88,19 @@ go run ./cmd/concurrency-demo            # 100 buyers, stock 1 -> 1 x 201, 99 x 
 ```
 
 Details: [docs/learning/07-transactions-and-concurrency.md](docs/learning/07-transactions-and-concurrency.md).
+
+### Idempotency: retries never duplicate an order
+
+Send `Idempotency-Key: <uuid>` with `POST /orders`. A retry with the same key and body returns the
+**original** order (`200 OK` + `Idempotent-Replayed: true`) instead of creating a second one. Even
+when duplicates arrive at the same moment, a unique index on `(user_id, idempotency_key)` lets
+only one INSERT win.
+
+```powershell
+go run ./cmd/concurrency-demo -mode idempotency -buyers 50   # 1 x 201, 49 x 200, one order id
+```
+
+Details: [docs/learning/08-idempotency.md](docs/learning/08-idempotency.md).
 
 ### Folder layout
 
@@ -247,7 +260,7 @@ reference is added in Stage 15.
 | PATCH | `/api/v1/products/{id}` | Admin | Partial update (SKU cannot change) | 400, 401, 403, 404 |
 | DELETE | `/api/v1/products/{id}` | Admin | Archive (soft delete), returns 204 | 400, 401, 403, 404 |
 | GET | `/api/v1/products/{id}/inventory` | Admin | Stock: `available_quantity`, `reserved_quantity`, `version` | 400, 401, 403, 404 |
-| POST | `/api/v1/orders` | Bearer | `{"items":[{"product_id":2,"quantity":3}]}` reserves stock and returns a `RESERVED` order | 400, 401, 409 `OUT_OF_STOCK` / `PRODUCT_UNAVAILABLE` |
+| POST | `/api/v1/orders` | Bearer | `{"items":[{"product_id":2,"quantity":3}]}` reserves stock and returns a `RESERVED` order (201). Optional `Idempotency-Key` header: a repeat returns the original order (200) | 400, 401, 409 `OUT_OF_STOCK` / `PRODUCT_UNAVAILABLE` / `IDEMPOTENCY_KEY_REUSED` |
 | GET | `/api/v1/orders` | Bearer | Your orders (admins see all): `status`, `limit`, `offset` | 400, 401 |
 | GET | `/api/v1/orders/{id}` | Bearer | One order with items. Someone else's order returns 404 | 400, 401, 404 |
 | POST | `/api/v1/orders/{id}/cancel` | Bearer | Cancel if the state machine allows it; reserved stock goes back to available | 404, 409 `INVALID_STATE_TRANSITION` |
@@ -328,7 +341,7 @@ docker compose exec postgres psql -U app -d inventory -c "UPDATE users SET role 
 5. ✅ Orders
 6. ✅ Inventory reservations
 7. ✅ Transactions and concurrency (100 concurrent buyers, 1 item in stock)
-8. Idempotency keys
+8. ✅ Idempotency keys
 9. Mock payments
 10. Background workers (reservation expiry)
 11. Redis (cache and rate limiting)

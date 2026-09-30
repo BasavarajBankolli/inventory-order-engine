@@ -2,6 +2,7 @@ package orders
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -38,9 +39,86 @@ func NewService(pool *pgxpool.Pool, orders *Repository, prods *products.Reposito
 	return &Service{pool: pool, orders: orders, products: prods, inventory: inv, reservationTTL: reservationTTL}
 }
 
-// Create places an order for the caller and reserves its stock.
+// Create places an order without an idempotency key.
+func (s *Service) Create(ctx context.Context, caller identity.Principal, requested []ItemRequest) (Order, error) {
+	o, _, err := s.CreateWithKey(ctx, caller, requested, "")
+	return o, err
+}
+
+// CreateWithKey places an order, or - if the caller already placed an order
+// with the same idempotency key - returns that order instead. replayed
+// reports which of the two happened.
 //
-//	validate request shape                       (no DB)
+//	key given and already used by this user?
+//	  same request     -> return the existing order (replayed = true)
+//	  other request    -> ErrIdempotencyKeyReused
+//	otherwise create (see createInTx). If a concurrent request with the same
+//	key wins the INSERT race, we get errDuplicateIdempotencyKey, our whole
+//	transaction (including any stock we touched) is rolled back, and we
+//	return the winner's order as a replay.
+//
+// Only SUCCESSFUL orders store their key. A request that failed (e.g.
+// OUT_OF_STOCK) left no row behind, so retrying it with the same key is a
+// genuinely new attempt - which is what a client retrying after an error
+// wants.
+func (s *Service) CreateWithKey(ctx context.Context, caller identity.Principal, requested []ItemRequest, key string) (o Order, replayed bool, err error) {
+	if err := validateItems(requested); err != nil {
+		return Order{}, false, err
+	}
+	if err := validateIdempotencyKey(key); err != nil {
+		return Order{}, false, err
+	}
+
+	var hash string
+	if key != "" {
+		hash = fingerprint(requested)
+
+		// Fast path: a plain retry of a request that already succeeded.
+		if o, found, err := s.replay(ctx, caller, key, hash); err != nil || found {
+			return o, found, err
+		}
+	}
+
+	o, err = s.createInTx(ctx, caller, requested, key, hash)
+	if errors.Is(err, errDuplicateIdempotencyKey) {
+		// Slow path: we raced another request with the same key and it
+		// committed first. Its order is now visible to us.
+		o, found, err := s.replay(ctx, caller, key, hash)
+		if err == nil && !found {
+			err = fmt.Errorf("order for idempotency key %q vanished after a duplicate-key error", key)
+		}
+		return o, found, err
+	}
+	if err != nil {
+		return Order{}, false, err
+	}
+
+	slog.InfoContext(ctx, "order created and stock reserved",
+		"order_id", o.ID, "total_amount", o.TotalAmount,
+		"currency", o.Currency, "items", len(o.Items), "idempotency_key_used", key != "")
+	return o, false, nil
+}
+
+// replay looks up the caller's order for key. found is false if there is
+// none; ErrIdempotencyKeyReused if there is one for a different request.
+func (s *Service) replay(ctx context.Context, caller identity.Principal, key, hash string) (Order, bool, error) {
+	o, err := s.orders.GetByIdempotencyKey(ctx, caller.UserID, key)
+	if errors.Is(err, ErrNotFound) {
+		return Order{}, false, nil
+	}
+	if err != nil {
+		return Order{}, false, err
+	}
+	if o.requestHash != hash {
+		return Order{}, false, ErrIdempotencyKeyReused
+	}
+	slog.InfoContext(ctx, "idempotent replay: returning existing order", "order_id", o.ID)
+	return o, true, nil
+}
+
+// createInTx places a new order and reserves its stock.
+//
+//	validate request shape                       (no DB, done by the caller)
 //	BEGIN
 //	  load the requested products                (current price + status)
 //	  buildItems: check + price snapshot + total  (pure Go)
@@ -58,11 +136,7 @@ func NewService(pool *pgxpool.Pool, orders *Repository, prods *products.Reposito
 // Reading the products INSIDE the transaction means the price stored in the
 // order is the price at the moment of ordering, and an archived/inactive
 // product is rejected even if it was active when the client loaded the page.
-func (s *Service) Create(ctx context.Context, caller identity.Principal, requested []ItemRequest) (Order, error) {
-	if err := validateItems(requested); err != nil {
-		return Order{}, err
-	}
-
+func (s *Service) createInTx(ctx context.Context, caller identity.Principal, requested []ItemRequest, key, hash string) (Order, error) {
 	var created Order
 	err := database.WithTx(ctx, s.pool, func(tx pgx.Tx) error {
 		ids := make([]int64, len(requested))
@@ -87,14 +161,16 @@ func (s *Service) Create(ctx context.Context, caller identity.Principal, request
 
 		repo := s.orders.WithTx(tx)
 		created, err = repo.Create(ctx, Order{
-			UserID:      caller.UserID,
-			Status:      StatusCreated,
-			TotalAmount: total,
-			Currency:    currency,
-			Items:       items,
+			UserID:         caller.UserID,
+			Status:         StatusCreated,
+			TotalAmount:    total,
+			Currency:       currency,
+			Items:          items,
+			idempotencyKey: key,
+			requestHash:    hash,
 		})
 		if err != nil {
-			return err
+			return err // may be errDuplicateIdempotencyKey
 		}
 
 		lines := make([]inventory.ReserveLine, len(items))
@@ -110,10 +186,6 @@ func (s *Service) Create(ctx context.Context, caller identity.Principal, request
 	if err != nil {
 		return Order{}, err
 	}
-
-	slog.InfoContext(ctx, "order created and stock reserved",
-		"order_id", created.ID, "total_amount", created.TotalAmount,
-		"currency", created.Currency, "items", len(created.Items))
 	return created, nil
 }
 

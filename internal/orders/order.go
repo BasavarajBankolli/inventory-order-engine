@@ -38,6 +38,10 @@ type Order struct {
 	Items       []Item    `json:"items,omitempty"` // empty in list responses
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+
+	// Idempotency data (Stage 8). Unexported, so never part of the JSON.
+	idempotencyKey string // "" = order was placed without a key
+	requestHash    string // fingerprint(items) of the original request
 }
 
 // Item is one line of an order. UnitPrice is a snapshot of the product's

@@ -31,7 +31,11 @@ type createRequest struct {
 
 // Create handles POST /api/v1/orders
 //
+//	Idempotency-Key: 3f0c7b8e-...        (optional, recommended)
 //	{"items": [{"product_id": 2, "quantity": 3}, {"product_id": 5, "quantity": 1}]}
+//
+// 201 Created = a new order. 200 OK + "Idempotent-Replayed: true" = this key
+// was already used for the same request; the body is the ORIGINAL order.
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	caller, ok := callerFrom(w, r)
 	if !ok {
@@ -48,12 +52,19 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		items[i] = ItemRequest{ProductID: it.ProductID, Quantity: it.Quantity}
 	}
 
-	o, err := h.svc.Create(r.Context(), caller, items)
+	key := r.Header.Get(IdempotencyKeyHeader)
+	o, replayed, err := h.svc.CreateWithKey(r.Context(), caller, items, key)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
+
 	w.Header().Set("Location", "/api/v1/orders/"+strconv.FormatInt(o.ID, 10))
+	if replayed {
+		w.Header().Set("Idempotent-Replayed", "true")
+		httpx.WriteJSON(w, r, http.StatusOK, o)
+		return
+	}
 	httpx.WriteJSON(w, r, http.StatusCreated, o)
 }
 
@@ -152,6 +163,9 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		// The message names the product and quantities; it contains only
 		// numbers we computed, so it is safe to return.
 		httpx.WriteError(w, r, http.StatusConflict, httpx.CodeOutOfStock, err.Error())
+	case errors.Is(err, ErrIdempotencyKeyReused):
+		httpx.WriteError(w, r, http.StatusConflict, httpx.CodeIdempotencyKeyReused,
+			"this Idempotency-Key was already used for a different request; use a new key for a new order")
 	case errors.Is(err, ErrInvalidTransition):
 		httpx.WriteError(w, r, http.StatusConflict, httpx.CodeInvalidTransition, err.Error())
 	default:

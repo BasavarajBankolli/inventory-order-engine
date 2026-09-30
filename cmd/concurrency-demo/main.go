@@ -1,9 +1,15 @@
 // Command concurrency-demo fires many simultaneous orders at a RUNNING API
-// and reports what happened. It is the live version of the "100 buyers,
-// 1 item" test.
+// and reports what happened.
+//
+// Mode "stock" (default) - the "100 buyers, 1 item" demo:
 //
 //	go run ./cmd/concurrency-demo                       # 100 buyers, stock 1
 //	go run ./cmd/concurrency-demo -buyers 200 -stock 5
+//
+// Mode "idempotency" - ONE buyer sends the same order N times at once with
+// the same Idempotency-Key (think: a double-click plus aggressive retries):
+//
+//	go run ./cmd/concurrency-demo -mode idempotency -buyers 50
 //
 // It needs an ADMIN account (to create the demo product and its stock); see
 // "Creating an admin" in the README. Buyer accounts are created on the fly.
@@ -31,16 +37,21 @@ func main() {
 		buyers    = flag.Int("buyers", 100, "number of concurrent buyers")
 		stock     = flag.Int("stock", 1, "units in stock before the race")
 		quantity  = flag.Int("quantity", 1, "units each buyer orders")
+		mode      = flag.String("mode", "stock", `"stock" (many buyers, scarce stock) or "idempotency" (one buyer, one key, many retries)`)
 	)
 	flag.Parse()
 
-	if err := run(*base, *adminUser, *adminPass, *buyers, *stock, *quantity); err != nil {
+	if *mode != "stock" && *mode != "idempotency" {
+		fmt.Fprintln(os.Stderr, `error: -mode must be "stock" or "idempotency"`)
+		os.Exit(2)
+	}
+	if err := run(*mode, *base, *adminUser, *adminPass, *buyers, *stock, *quantity); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run(base, adminEmail, adminPassword string, buyers, stock, quantity int) error {
+func run(mode, base, adminEmail, adminPassword string, buyers, stock, quantity int) error {
 	c := &client{
 		base: base,
 		http: &http.Client{
@@ -72,13 +83,31 @@ func run(base, adminEmail, adminPassword string, buyers, stock, quantity int) er
 		return fmt.Errorf("add stock: %w", err)
 	}
 
-	fmt.Printf("3. Preparing %d buyer accounts (not timed)\n", buyers)
-	tokens, err := c.prepareBuyers(buyers)
-	if err != nil {
-		return err
+	// In idempotency mode every request comes from the same buyer and
+	// carries the same key; otherwise each buyer is a different person.
+	var tokens []string
+	var key string
+	if mode == "idempotency" {
+		fmt.Println("3. Preparing 1 buyer account")
+		one, err := c.prepareBuyers(1)
+		if err != nil {
+			return err
+		}
+		tokens = make([]string, buyers)
+		for i := range tokens {
+			tokens[i] = one[0]
+		}
+		key = fmt.Sprintf("demo-%d", time.Now().UnixNano())
+		fmt.Printf("4. GO: the same order sent %d times at once with Idempotency-Key %s\n", buyers, key)
+	} else {
+		fmt.Printf("3. Preparing %d buyer accounts (not timed)\n", buyers)
+		var err error
+		if tokens, err = c.prepareBuyers(buyers); err != nil {
+			return err
+		}
+		fmt.Printf("4. GO: %d buyers x %d unit(s), all at the same instant\n", buyers, quantity)
 	}
 
-	fmt.Printf("4. GO: %d buyers x %d unit(s), all at the same instant\n", buyers, quantity)
 	results := make([]result, buyers)
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -87,7 +116,7 @@ func run(base, adminEmail, adminPassword string, buyers, stock, quantity int) er
 		go func() {
 			defer wg.Done()
 			<-start
-			results[i] = c.placeOrder(tokens[i], product.ID, quantity)
+			results[i] = c.placeOrder(tokens[i], product.ID, quantity, key)
 		}()
 	}
 	began := time.Now()
@@ -104,12 +133,45 @@ func run(base, adminEmail, adminPassword string, buyers, stock, quantity int) er
 		return fmt.Errorf("read inventory: %w", err)
 	}
 
+	if mode == "idempotency" {
+		return reportIdempotency(results, elapsed, quantity, inv.Available, inv.Reserved)
+	}
 	return report(results, elapsed, stock, quantity, inv.Available, inv.Reserved)
 }
 
 type result struct {
-	status int
-	code   string // API error code, "" on success
+	status  int
+	code    string // API error code, "" on success
+	orderID int64  // set on 200/201
+}
+
+func reportIdempotency(results []result, elapsed time.Duration, quantity, available, reserved int) error {
+	statuses := map[int]int{}
+	ids := map[int64]int{}
+	for _, r := range results {
+		statuses[r.status]++
+		if r.orderID != 0 {
+			ids[r.orderID]++
+		}
+	}
+
+	fmt.Printf("\nResults (%d requests in %v)\n", len(results), elapsed.Round(time.Millisecond))
+	fmt.Printf("   201 CREATED (new order)       %4d\n", statuses[http.StatusCreated])
+	fmt.Printf("   200 OK (idempotent replay)    %4d\n", statuses[http.StatusOK])
+	for st, n := range statuses {
+		if st != http.StatusCreated && st != http.StatusOK {
+			fmt.Printf("   %d (unexpected)              %4d\n", st, n)
+		}
+	}
+	fmt.Printf("   distinct order ids returned   %4d  %v\n", len(ids), ids)
+	fmt.Printf("\nFinal inventory: available=%d reserved=%d\n", available, reserved)
+
+	if statuses[http.StatusCreated] == 1 && statuses[http.StatusOK] == len(results)-1 &&
+		len(ids) == 1 && reserved == quantity {
+		fmt.Println("\nPASS: one order was created; every retry got that same order back; stock was reserved once.")
+		return nil
+	}
+	return fmt.Errorf("FAIL: expected 1 new order and %d replays of it", len(results)-1)
 }
 
 func report(results []result, elapsed time.Duration, stock, quantity, available, reserved int) error {
@@ -231,9 +293,12 @@ func (c *client) prepareBuyers(n int) ([]string, error) {
 	return tokens, errors.Join(errs...)
 }
 
-func (c *client) placeOrder(token string, productID int64, quantity int) result {
+func (c *client) placeOrder(token string, productID int64, quantity int, idempotencyKey string) result {
 	body := map[string]any{"items": []map[string]any{{"product_id": productID, "quantity": quantity}}}
-	var errBody struct {
+	// Success and error bodies are decoded into one struct: "id" is filled
+	// for orders, "error.code" for errors.
+	var resBody struct {
+		ID    int64 `json:"id"`
 		Error struct {
 			Code string `json:"code"`
 		} `json:"error"`
@@ -246,14 +311,15 @@ func (c *client) placeOrder(token string, productID int64, quantity int) result 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return result{status: -1, code: "NETWORK_ERROR"}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		_ = json.NewDecoder(resp.Body).Decode(&errBody)
-	}
-	return result{status: resp.StatusCode, code: errBody.Error.Code}
+	_ = json.NewDecoder(resp.Body).Decode(&resBody)
+	return result{status: resp.StatusCode, code: resBody.Error.Code, orderID: resBody.ID}
 }

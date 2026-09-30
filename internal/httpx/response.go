@@ -17,20 +17,21 @@ import (
 // the human-readable message (messages may change, codes may not).
 // More codes (OUT_OF_STOCK, ...) are added in later stages.
 const (
-	CodeValidation         = "VALIDATION_ERROR"
-	CodeUnauthenticated    = "UNAUTHENTICATED"
-	CodeInvalidCredentials = "INVALID_CREDENTIALS"
-	CodeForbidden          = "FORBIDDEN"
-	CodeNotFound           = "NOT_FOUND"
-	CodeMethodNotAllowed   = "METHOD_NOT_ALLOWED"
-	CodeEmailTaken         = "EMAIL_ALREADY_EXISTS"
-	CodeSKUTaken           = "SKU_ALREADY_EXISTS"
-	CodeInsufficientStock  = "INSUFFICIENT_STOCK"
-	CodeVersionConflict    = "VERSION_CONFLICT"
-	CodeProductUnavailable = "PRODUCT_UNAVAILABLE"
-	CodeOutOfStock         = "OUT_OF_STOCK"
-	CodeInvalidTransition  = "INVALID_STATE_TRANSITION"
-	CodeInternal           = "INTERNAL_ERROR"
+	CodeValidation           = "VALIDATION_ERROR"
+	CodeUnauthenticated      = "UNAUTHENTICATED"
+	CodeInvalidCredentials   = "INVALID_CREDENTIALS"
+	CodeForbidden            = "FORBIDDEN"
+	CodeNotFound             = "NOT_FOUND"
+	CodeMethodNotAllowed     = "METHOD_NOT_ALLOWED"
+	CodeEmailTaken           = "EMAIL_ALREADY_EXISTS"
+	CodeSKUTaken             = "SKU_ALREADY_EXISTS"
+	CodeInsufficientStock    = "INSUFFICIENT_STOCK"
+	CodeVersionConflict      = "VERSION_CONFLICT"
+	CodeProductUnavailable   = "PRODUCT_UNAVAILABLE"
+	CodeOutOfStock           = "OUT_OF_STOCK"
+	CodeIdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED"
+	CodeInvalidTransition    = "INVALID_STATE_TRANSITION"
+	CodeInternal             = "INTERNAL_ERROR"
 )
 
 // ErrorBody is the JSON shape of every error response.

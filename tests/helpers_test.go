@@ -56,6 +56,12 @@ func newTestAPI(t *testing.T) *testAPI {
 // decodes the JSON response into out (if out is not nil).
 func (a *testAPI) do(method, path string, body any, token string, out any) *http.Response {
 	a.t.Helper()
+	return a.doWithHeaders(method, path, body, token, nil, out)
+}
+
+// doWithHeaders is do plus extra request headers (e.g. Idempotency-Key).
+func (a *testAPI) doWithHeaders(method, path string, body any, token string, headers map[string]string, out any) *http.Response {
+	a.t.Helper()
 
 	var reader io.Reader
 	if body != nil {
@@ -73,6 +79,9 @@ func (a *testAPI) do(method, path string, body any, token string, out any) *http
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
