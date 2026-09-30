@@ -14,17 +14,20 @@ import (
 	"inventory-order-engine/internal/auth"
 	"inventory-order-engine/internal/health"
 	"inventory-order-engine/internal/httpx"
+	"inventory-order-engine/internal/identity"
 	"inventory-order-engine/internal/middleware"
+	"inventory-order-engine/internal/products"
 	"inventory-order-engine/internal/users"
 )
 
-// Deps lists everything the router needs. New modules (products, orders,
+// Deps lists everything the router needs. New modules (inventory, orders,
 // ...) add their handlers here in later stages.
 type Deps struct {
-	Logger *slog.Logger
-	Health *health.Handler
-	Auth   *auth.Handler
-	Users  *users.Handler
+	Logger   *slog.Logger
+	Health   *health.Handler
+	Auth     *auth.Handler
+	Users    *users.Handler
+	Products *products.Handler
 
 	// RequireAuth is the middleware that rejects requests without a valid
 	// access token.
@@ -53,15 +56,27 @@ func NewRouter(d Deps) http.Handler {
 
 	// Versioned business API.
 	r.Route("/api/v1", func(r chi.Router) {
-		// Public: anyone can register or log in.
+		// Public: no token needed.
 		r.Post("/auth/register", d.Auth.Register)
 		r.Post("/auth/login", d.Auth.Login)
+		r.Get("/products", d.Products.List)
+		r.Get("/products/{id}", d.Products.Get)
 
 		// Authenticated: every route in this group needs a valid token.
 		r.Group(func(r chi.Router) {
 			r.Use(d.RequireAuth)
 
 			r.Get("/users/me", d.Users.Me)
+
+			// Admin only: RequireRole runs after RequireAuth, so it can
+			// read the caller's role from the context.
+			r.Group(func(r chi.Router) {
+				r.Use(auth.RequireRole(identity.RoleAdmin))
+
+				r.Post("/products", d.Products.Create)
+				r.Patch("/products/{id}", d.Products.Update)
+				r.Delete("/products/{id}", d.Products.Delete)
+			})
 		})
 	})
 

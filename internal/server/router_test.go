@@ -13,6 +13,7 @@ import (
 	"inventory-order-engine/internal/health"
 	"inventory-order-engine/internal/httpx"
 	"inventory-order-engine/internal/logging"
+	"inventory-order-engine/internal/products"
 	"inventory-order-engine/internal/requestid"
 	"inventory-order-engine/internal/users"
 )
@@ -30,6 +31,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 		}),
 		Auth:        auth.NewHandler(nil),
 		Users:       users.NewHandler(nil),
+		Products:    products.NewHandler(nil),
 		RequireAuth: func(next http.Handler) http.Handler { return next },
 	})
 	srv := httptest.NewServer(router)

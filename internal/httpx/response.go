@@ -24,6 +24,7 @@ const (
 	CodeNotFound           = "NOT_FOUND"
 	CodeMethodNotAllowed   = "METHOD_NOT_ALLOWED"
 	CodeEmailTaken         = "EMAIL_ALREADY_EXISTS"
+	CodeSKUTaken           = "SKU_ALREADY_EXISTS"
 	CodeInternal           = "INTERNAL_ERROR"
 )
 

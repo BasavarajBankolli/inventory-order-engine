@@ -6,7 +6,7 @@ It is built to handle concurrent orders correctly and **never oversell stock**.
 This is a learning and portfolio project, so the code favours clarity over cleverness.
 Each module has a matching explanation in [`docs/learning/`](docs/learning/).
 
-> **Status: Stage 2 of 15 — skeleton + authentication (register, login, JWT, roles).**
+> **Status: Stage 3 of 15 — skeleton, authentication, product catalogue.**
 > This README grows with each stage.
 
 ---
@@ -34,14 +34,17 @@ flowchart LR
     req[HTTP request] --> rid[RequestID] --> log[Logger] --> rec[Recoverer] --> router{chi router}
     router --> h[/health, /ready/]
     router --> pub[/auth/register, /auth/login/]
+    router --> pubp[/GET products/]
     router --> ra[RequireAuth] --> me[/users/me/]
+    ra --> rr[RequireRole ADMIN] --> adm[/POST, PATCH, DELETE products/]
 ```
 
 Handlers stay thin. Business rules live in services, and SQL lives in repositories:
 
 ```text
-HTTP handler  ->  service (rules)  ->  repository (SQL)  ->  PostgreSQL
-auth.Handler      auth.Service         users.Repository
+HTTP handler      ->  service (rules)   ->  repository (SQL)    ->  PostgreSQL
+auth.Handler          auth.Service          users.Repository
+products.Handler      products.Service      products.Repository
 ```
 
 ### Folder layout
@@ -60,6 +63,7 @@ internal/
   identity/            Principal (user id + role) of the authenticated caller, in context
   logging/             Structured JSON logger (log/slog) that adds request_id automatically
   middleware/          RequestID, Logger, Recoverer
+  products/            Product catalogue: validation, soft delete, list/search/sort/paginate
   requestid/           Stores and reads the request ID in context.Context
   server/              Router: maps URLs to handlers
   testutil/            Helpers used only by tests (isolated, migrated test schemas)
@@ -71,7 +75,7 @@ docs/learning/         Beginner-friendly explanations for every module
 tests/                 End-to-end API tests (HTTP -> router -> services -> PostgreSQL)
 ```
 
-Packages such as `products/`, `inventory/`, `orders/`, `payments/`, `events/`, `worker/`,
+Packages such as `inventory/`, `orders/`, `payments/`, `events/`, `worker/`,
 and `cache/` are added in later stages. There is no `pkg/` folder, because
 nothing here is meant to be imported by other projects.
 
@@ -170,7 +174,7 @@ time the Postgres volume is initialised. Every integration test gets its own tem
 | Kind | Where | Needs DB |
 |---|---|---|
 | Unit | `internal/**/..._test.go` (for example `auth/service_test.go`, which uses an in-memory fake store) | no |
-| Repository integration | `internal/users/repository_test.go`, `internal/database/migrate_test.go` | yes |
+| Repository integration | `internal/*/repository_test.go`, `internal/database/migrate_test.go` | yes |
 | End-to-end API | `tests/` | yes |
 
 ---
@@ -178,7 +182,8 @@ time the Postgres volume is initialised. Every integration test gets its own tem
 ## API
 
 All business endpoints are under `/api/v1`. Request and response details are in
-[docs/learning/02-authentication.md](docs/learning/02-authentication.md). A complete API
+[docs/learning/02-authentication.md](docs/learning/02-authentication.md) and
+[docs/learning/03-products.md](docs/learning/03-products.md). A complete API
 reference is added in Stage 15.
 
 | Method | URL | Auth | Description | Errors |
@@ -188,6 +193,14 @@ reference is added in Stage 15.
 | POST | `/api/v1/auth/register` | none | Create a CUSTOMER account | 400 `VALIDATION_ERROR`, 409 `EMAIL_ALREADY_EXISTS` |
 | POST | `/api/v1/auth/login` | none | Exchange email and password for a JWT | 400, 401 `INVALID_CREDENTIALS` |
 | GET | `/api/v1/users/me` | Bearer | Profile of the logged-in user | 401 `UNAUTHENTICATED` |
+| GET | `/api/v1/products` | none | List products: `q`, `status`, `sort`, `limit`, `offset` | 400 |
+| GET | `/api/v1/products/{id}` | none | One product (archived products return 404) | 400, 404 |
+| POST | `/api/v1/products` | Admin | Create a product | 400, 401, 403, 409 `SKU_ALREADY_EXISTS` |
+| PATCH | `/api/v1/products/{id}` | Admin | Partial update (SKU cannot change) | 400, 401, 403, 404 |
+| DELETE | `/api/v1/products/{id}` | Admin | Archive (soft delete), returns 204 | 400, 401, 403, 404 |
+
+**Money:** `price` is an integer in **minor units** (paise or cents). `"price": 129900, "currency": "INR"`
+means ₹1,299.00. Floats are never used for money.
 
 Every response has an `X-Request-ID` header. Every error uses this shape (`fields` appears only
 on validation errors):
@@ -216,6 +229,13 @@ Invoke-RestMethod -Uri "$base/users/me" -Headers $headers
 
 # See an error body (Invoke-RestMethod throws on 4xx, so catch it)
 try { Invoke-RestMethod -Uri "$base/users/me" } catch { $_.ErrorDetails.Message }
+
+# 4. Products (the create call needs an ADMIN token; see "Creating an admin" below)
+$p = @{ sku = "MOUSE-01"; name = "Wireless Mouse"; price = 129900; currency = "INR" } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri "$base/products" -Headers $headers -ContentType "application/json" -Body $p
+Invoke-RestMethod -Uri "$base/products?q=mouse&sort=price_asc&limit=10"
+Invoke-RestMethod -Method Patch -Uri "$base/products/1" -Headers $headers -ContentType "application/json" -Body '{"price": 99900}'
+Invoke-WebRequest -Method Delete -Uri "$base/products/1" -Headers $headers -UseBasicParsing   # 204
 ```
 
 > In Windows PowerShell, `curl` is an alias for `Invoke-WebRequest`. If you use real curl, type
@@ -238,7 +258,7 @@ docker compose exec postgres psql -U app -d inventory -c "UPDATE users SET role 
 
 1. ✅ Project setup, Docker, PostgreSQL
 2. ✅ Authentication (register, login, JWT, roles)
-3. Products
+3. ✅ Products
 4. Inventory
 5. Orders
 6. Inventory reservations

@@ -7,6 +7,7 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
 	"inventory-order-engine/internal/app"
@@ -25,8 +27,9 @@ import (
 
 // testAPI is a running API server backed by a fresh, migrated schema.
 type testAPI struct {
-	t   *testing.T
-	srv *httptest.Server
+	t    *testing.T
+	srv  *httptest.Server
+	pool *pgxpool.Pool // direct DB access for setup (e.g. promoting admins)
 }
 
 func newTestAPI(t *testing.T) *testAPI {
@@ -45,7 +48,7 @@ func newTestAPI(t *testing.T) *testAPI {
 
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return &testAPI{t: t, srv: srv}
+	return &testAPI{t: t, srv: srv, pool: pool}
 }
 
 // do sends a request with an optional JSON body and bearer token, and
@@ -100,4 +103,31 @@ func expectStatus(t *testing.T, resp *http.Response, want int) {
 	if resp.StatusCode != want {
 		t.Fatalf("%s %s: status = %d, want %d", resp.Request.Method, resp.Request.URL.Path, resp.StatusCode, want)
 	}
+}
+
+// loginAs registers a user, optionally promotes them to ADMIN directly in
+// the database (the API deliberately has no way to do that), logs in and
+// returns the access token.
+func (a *testAPI) loginAs(email string, admin bool) string {
+	a.t.Helper()
+	const password = "test-password-1"
+
+	resp := a.do("POST", "/api/v1/auth/register",
+		map[string]string{"email": email, "name": "Test", "password": password}, "", nil)
+	expectStatus(a.t, resp, http.StatusCreated)
+
+	if admin {
+		if _, err := a.pool.Exec(context.Background(),
+			"UPDATE users SET role = 'ADMIN' WHERE email = $1", email); err != nil {
+			a.t.Fatal(err)
+		}
+	}
+
+	var login struct {
+		AccessToken string `json:"access_token"`
+	}
+	resp = a.do("POST", "/api/v1/auth/login",
+		map[string]string{"email": email, "password": password}, "", &login)
+	expectStatus(a.t, resp, http.StatusOK)
+	return login.AccessToken
 }
