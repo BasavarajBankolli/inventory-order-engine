@@ -37,6 +37,10 @@ type Deps struct {
 	// access token.
 	RequireAuth func(http.Handler) http.Handler
 
+	// CORSAllowedOrigins: browser origins allowed to call the API (the
+	// frontend). Empty = CORS off.
+	CORSAllowedOrigins []string
+
 	// Rate limiters (Stage 11). nil = no rate limiting (e.g. no Redis).
 	RateLimitByIP   func(http.Handler) http.Handler // public routes
 	RateLimitByUser func(http.Handler) http.Handler // authenticated routes
@@ -57,6 +61,9 @@ func NewRouter(d Deps) http.Handler {
 	// Order matters: RequestID runs first so the logger and the recoverer
 	// can see the ID; Recoverer sits inside Logger so a panic is logged
 	// as a 500 response.
+	// CORS first: a browser preflight (OPTIONS) is answered before routing,
+	// auth or rate limiting - it carries no token and must not be blocked.
+	r.Use(middleware.CORS(d.CORSAllowedOrigins))
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger(d.Logger))
 	r.Use(middleware.Recoverer(d.Logger))

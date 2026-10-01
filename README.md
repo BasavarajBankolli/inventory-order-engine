@@ -4,6 +4,8 @@ A production-style backend in Go that manages products, inventory, and orders.
 It is built to handle concurrent orders correctly and **never oversell stock**.
 
 This is a learning and portfolio project, so the code favours clarity over cleverness.
+A React frontend (`frontend/`) lets customers shop and admins manage the catalogue and stock;
+see [frontend/README.md](frontend/README.md).
 Each module has a matching explanation in [`docs/learning/`](docs/learning/).
 
 > **Status: Stage 13 of 15 — all features built; 359 tests (unit, integration, concurrency, failure), 88.7% coverage.**
@@ -15,7 +17,7 @@ Each module has a matching explanation in [`docs/learning/`](docs/learning/).
 
 ```mermaid
 flowchart LR
-    client([Client / curl]) -->|HTTP :8080| api
+    client([React frontend / curl]) -->|HTTP :8080| api
     subgraph docker compose
         migrate[migrate<br/>runs once, exits] -->|applies SQL| pg[(PostgreSQL 17)]
         api[api<br/>Go HTTP server] -->|pgx pool| pg
@@ -195,6 +197,7 @@ internal/
 migrations/            Numbered .sql files, embedded into the binary
 docker/postgres/init/  One-time Postgres setup (creates the test database)
 docs/learning/         Beginner-friendly explanations for every module
+frontend/              React + TypeScript web app (Vite), deployable to Vercel
 tests/                 End-to-end API tests (HTTP -> router -> services -> PostgreSQL)
 ```
 
@@ -409,6 +412,23 @@ tokens keep the old role until they expire.
 ```powershell
 docker compose exec postgres psql -U app -d inventory -c "UPDATE users SET role = 'ADMIN', updated_at = now() WHERE email = 'alice@example.com';"
 ```
+
+---
+
+## Frontend
+
+`frontend/` is a React 19 + TypeScript + Vite app built on the real API: login and register,
+shop with search and sort, cart, checkout (with an idempotency key), payment (approve, decline or
+timeout via the mock provider), order history, and admin dashboard, products and inventory.
+
+```powershell
+docker compose up --build -d          # backend on :8080
+cd frontend; npm install; npm run dev # frontend on http://localhost:5173
+```
+
+The backend only allows browser calls from origins listed in `CORS_ALLOWED_ORIGINS` (Docker
+Compose allows `http://localhost:5173` and `:4173`). For production, add your Vercel URL.
+Deployment steps are in [frontend/README.md](frontend/README.md).
 
 ---
 

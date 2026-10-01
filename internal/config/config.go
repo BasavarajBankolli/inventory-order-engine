@@ -84,6 +84,11 @@ type Config struct {
 	// OutboxFailureRate (0.0-1.0) makes the demo publisher fail on purpose,
 	// to watch retries. 0 in normal use.
 	OutboxFailureRate float64
+
+	// CORSAllowedOrigins lists browser origins allowed to call the API,
+	// e.g. http://localhost:5173,https://my-shop.vercel.app ("*" = any).
+	// Empty = CORS disabled.
+	CORSAllowedOrigins []string
 }
 
 // minJWTSecretLen: HMAC-SHA256 keys shorter than 32 bytes (256 bits) are
@@ -227,6 +232,13 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("OUTBOX_FAILURE_RATE must be between 0 and 1, got %q", v)
 		}
 		cfg.OutboxFailureRate = f
+	}
+
+	for _, o := range strings.Split(os.Getenv("CORS_ALLOWED_ORIGINS"), ",") {
+		// Browsers send the origin without a trailing slash.
+		if o = strings.TrimRight(strings.TrimSpace(o), "/"); o != "" {
+			cfg.CORSAllowedOrigins = append(cfg.CORSAllowedOrigins, o)
+		}
 	}
 
 	return cfg, nil

@@ -120,6 +120,8 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts
 		Inventory:   inventory.NewHandler(s.inventory),
 		Orders:      orders.NewHandler(s.orders),
 		RequireAuth: auth.RequireAuth(s.tokens),
+
+		CORSAllowedOrigins: cfg.CORSAllowedOrigins,
 	}
 
 	if opts.Redis != nil {
