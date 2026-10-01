@@ -16,6 +16,7 @@ import (
 	"inventory-order-engine/internal/httpx"
 	"inventory-order-engine/internal/identity"
 	"inventory-order-engine/internal/inventory"
+	"inventory-order-engine/internal/metrics"
 	"inventory-order-engine/internal/middleware"
 	"inventory-order-engine/internal/orders"
 	"inventory-order-engine/internal/products"
@@ -41,6 +42,9 @@ type Deps struct {
 	// frontend). Empty = CORS off.
 	CORSAllowedOrigins []string
 
+	// Metrics (Stage 14). nil = no metrics and no /metrics endpoint.
+	Metrics *metrics.Metrics
+
 	// Rate limiters (Stage 11). nil = no rate limiting (e.g. no Redis).
 	RateLimitByIP   func(http.Handler) http.Handler // public routes
 	RateLimitByUser func(http.Handler) http.Handler // authenticated routes
@@ -65,7 +69,7 @@ func NewRouter(d Deps) http.Handler {
 	// auth or rate limiting - it carries no token and must not be blocked.
 	r.Use(middleware.CORS(d.CORSAllowedOrigins))
 	r.Use(middleware.RequestID)
-	r.Use(middleware.Logger(d.Logger))
+	r.Use(middleware.Logger(d.Logger, d.Metrics))
 	r.Use(middleware.Recoverer(d.Logger))
 
 	// Unknown URLs and wrong methods also get our JSON error format.
@@ -76,6 +80,11 @@ func NewRouter(d Deps) http.Handler {
 	// infrastructure (Docker, load balancers), not for API clients.
 	r.Get("/health", d.Health.Health)
 	r.Get("/ready", d.Health.Ready)
+	if d.Metrics != nil {
+		// Prometheus scrapes this. In production, expose it only to the
+		// monitoring network (it reveals internal details), never publicly.
+		r.Method(http.MethodGet, "/metrics", d.Metrics.Handler())
+	}
 
 	// Versioned business API.
 	// /health and /ready are NOT rate limited: infrastructure probes them

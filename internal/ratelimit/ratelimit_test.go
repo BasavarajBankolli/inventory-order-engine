@@ -12,6 +12,7 @@ import (
 
 	"inventory-order-engine/internal/httpx"
 	"inventory-order-engine/internal/identity"
+	"inventory-order-engine/internal/metrics"
 	"inventory-order-engine/internal/testutil"
 )
 
@@ -123,7 +124,8 @@ func okHandler() http.Handler {
 
 func TestMiddleware_Returns429WithHeaders(t *testing.T) {
 	rdb, prefix := testutil.NewRedis(t)
-	h := Middleware(NewLimiter(rdb, 2, time.Minute, prefix), ByIP)(okHandler())
+	m := metrics.New()
+	h := Middleware(NewLimiter(rdb, 2, time.Minute, prefix), ByIP, m)(okHandler())
 
 	send := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -148,11 +150,14 @@ func TestMiddleware_Returns429WithHeaders(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Error.Code != httpx.CodeRateLimited {
 		t.Errorf("body = %s", rec.Body.String())
 	}
+	if got := m.Value("http_rate_limited_total"); got != 1 {
+		t.Errorf("http_rate_limited_total = %v, want 1 (only the rejected request)", got)
+	}
 }
 
 // Redis down: requests are ALLOWED (fail open), not rejected.
 func TestMiddleware_FailsOpenWhenRedisIsDown(t *testing.T) {
-	h := Middleware(NewLimiter(testutil.NewBrokenRedis(t), 1, time.Minute, ""), ByIP)(okHandler())
+	h := Middleware(NewLimiter(testutil.NewBrokenRedis(t), 1, time.Minute, ""), ByIP, nil)(okHandler())
 
 	for i := 0; i < 3; i++ {
 		rec := httptest.NewRecorder()

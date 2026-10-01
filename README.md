@@ -160,6 +160,24 @@ and never describes a change that rolled back. The worker publishes them:
 Delivery is at-least-once, so consumers must ignore event ids they've already seen. Details:
 [docs/learning/12-outbox.md](docs/learning/12-outbox.md).
 
+### Observability: logs, metrics, health checks
+
+| Signal | Where |
+|---|---|
+| JSON logs | One line per request: `method`, `path`, `route`, `status`, `duration_ms`, `user_id`, `request_id`. No query strings, headers or bodies |
+| API metrics | `GET http://localhost:8080/metrics` (Prometheus format) |
+| Worker metrics | `GET http://localhost:9091/metrics`; worker liveness at `GET :9091/health` |
+| Health | `/health` = liveness (process up), `/ready` = readiness (PostgreSQL reachable; Redis reported as `degraded`) |
+
+Metrics: `http_requests_total` and `http_request_duration_seconds` (labelled by route **pattern**,
+e.g. `/api/v1/orders/{id}`, never by raw id), `orders_created_total`,
+`orders_failed_total{reason}`, `inventory_reservations_total{event}`, `payments_success_total`,
+`payments_failed_total{reason}`, `outbox_events_processed_total{result}`,
+`product_cache_requests_total{result}`, `http_rate_limited_total`, plus Go runtime and process
+metrics. Business metrics are recorded **after commit**, exactly once: rollbacks, idempotent
+replays and duplicate payments are never counted. Details:
+[docs/learning/14-observability.md](docs/learning/14-observability.md).
+
 ### Folder layout
 
 ```text
@@ -169,7 +187,7 @@ cmd/
 scripts/
   test.ps1             Runs the whole test suite (Docker deps, env vars, vet, race, coverage)
   migrate/main.go      Applies pending SQL migrations, then exits
-  worker/main.go       Background jobs: reservation expiry and payment reconciliation
+  worker/main.go       Background jobs (expiry, reconciliation, outbox) + /metrics, /health on :9091
 internal/
   app/                 Builds every module and connects them (used by main and API tests)
   auth/                Register/login service, bcrypt, JWT, RequireAuth/RequireRole middleware
@@ -178,6 +196,7 @@ internal/
   events/              Transactional outbox: write events in the business tx, publish with retries
   database/            PostgreSQL pool, migration runner, WithTx transaction helper
   health/              /health (liveness) and /ready (readiness)
+  metrics/             Prometheus metrics (own registry, nil-safe recording methods)
   inventory/           Stock levels: domain rules, row locking, optimistic versioning
   httpx/               Shared JSON helpers: strict body decoding, response and error helpers
   identity/            Principal (user id + role) of the authenticated caller, in context
@@ -333,6 +352,7 @@ reference is added in Stage 15.
 |---|---|---|---|---|
 | GET | `/health` | none | Liveness: returns 200 if the process is running | – |
 | GET | `/ready` | none | Readiness: returns 200 if dependencies are reachable, otherwise 503 | 503 |
+| GET | `/metrics` | none | Prometheus metrics (keep it on an internal network in production) | – |
 | POST | `/api/v1/auth/register` | none | Create a CUSTOMER account | 400 `VALIDATION_ERROR`, 409 `EMAIL_ALREADY_EXISTS` |
 | POST | `/api/v1/auth/login` | none | Exchange email and password for a JWT | 400, 401 `INVALID_CREDENTIALS` |
 | GET | `/api/v1/users/me` | Bearer | Profile of the logged-in user | 401 `UNAUTHENTICATED` |
@@ -447,5 +467,5 @@ Deployment steps are in [frontend/README.md](frontend/README.md).
 11. ✅ Redis (cache and rate limiting)
 12. ✅ Transactional outbox
 13. ✅ Test suite hardening
-14. Observability (Prometheus metrics)
+14. ✅ Observability (Prometheus metrics, health checks)
 15. Deployment and full documentation

@@ -9,6 +9,7 @@ import (
 
 	"inventory-order-engine/internal/config"
 	"inventory-order-engine/internal/events"
+	"inventory-order-engine/internal/metrics"
 	"inventory-order-engine/internal/testutil"
 )
 
@@ -26,7 +27,7 @@ func workerConfig() config.Config {
 
 func jobByName(t *testing.T, cfg config.Config, pool *pgxpool.Pool, name string) func(context.Context) error {
 	t.Helper()
-	jobs, err := NewWorkerJobs(cfg, pool)
+	jobs, err := NewWorkerJobs(cfg, pool, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,5 +76,32 @@ func TestWorkerJobs_DatabaseDownReturnsErrors(t *testing.T) {
 		if err := jobByName(t, workerConfig(), pool, name)(context.Background()); err == nil {
 			t.Errorf("%s with the database down: error = nil", name)
 		}
+	}
+}
+
+// The worker records outbox results in its metrics.
+func TestWorkerJobs_OutboxMetrics(t *testing.T) {
+	pool := testutil.NewMigratedPool(t)
+	ctx := context.Background()
+	for i := int64(1); i <= 2; i++ {
+		if err := events.NewOutbox(pool).Add(ctx, events.OrderCreated, events.AggregateOrder, i, map[string]int64{"order_id": i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := metrics.New()
+	jobs, err := NewWorkerJobs(workerConfig(), pool, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range jobs {
+		if j.Name == "publish-outbox" {
+			if err := j.Run(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if got := m.Value("outbox_events_processed_total", "result", "published"); got != 2 {
+		t.Errorf("published = %v, want 2", got)
 	}
 }

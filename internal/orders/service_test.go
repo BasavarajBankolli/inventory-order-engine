@@ -12,6 +12,7 @@ import (
 	"inventory-order-engine/internal/events"
 	"inventory-order-engine/internal/identity"
 	"inventory-order-engine/internal/inventory"
+	"inventory-order-engine/internal/metrics"
 	"inventory-order-engine/internal/orders"
 	"inventory-order-engine/internal/payments"
 	"inventory-order-engine/internal/products"
@@ -32,6 +33,12 @@ type fixture struct {
 
 func setup(t *testing.T) fixture {
 	t.Helper()
+	return setupWithMetrics(t, nil)
+}
+
+// setupWithMetrics is setup with a metrics recorder (m may be nil).
+func setupWithMetrics(t *testing.T, m *metrics.Metrics) fixture {
+	t.Helper()
 	pool := testutil.NewMigratedPool(t)
 	provider := payments.NewMockProvider(pool, payments.OutcomeSuccess)
 	f := fixture{
@@ -47,6 +54,7 @@ func setup(t *testing.T) fixture {
 			ReservationTTL: 15 * time.Minute,
 			PaymentTimeout: 200 * time.Millisecond,
 			ReconcileAfter: time.Second,
+			Metrics:        m,
 		}),
 		provider: provider,
 	}

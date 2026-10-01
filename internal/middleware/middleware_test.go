@@ -10,8 +10,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
+
 	"inventory-order-engine/internal/httpx"
+	"inventory-order-engine/internal/identity"
 	"inventory-order-engine/internal/logging"
+	"inventory-order-engine/internal/metrics"
 	"inventory-order-engine/internal/requestid"
 )
 
@@ -64,7 +68,7 @@ func TestLogger_LogsStatusAndRequestID(t *testing.T) {
 	var logs bytes.Buffer
 	logger := logging.New(&logs, slog.LevelInfo)
 
-	h := RequestID(Logger(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := RequestID(Logger(logger, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
 	})))
 
@@ -117,5 +121,43 @@ func TestRecoverer_ReturnsJSON500(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "boom") {
 		t.Error("panic details must not be sent to the client")
+	}
+}
+
+// The log line and the metrics use the chi route PATTERN, never the raw
+// path, and the log names the authenticated user.
+func TestLogger_RoutePatternMetricsAndUserID(t *testing.T) {
+	var logs bytes.Buffer
+	m := metrics.New()
+
+	r := chi.NewRouter()
+	r.Use(Logger(logging.New(&logs, slog.LevelInfo), m))
+	r.Get("/orders/{id}", func(w http.ResponseWriter, r *http.Request) {
+		// What RequireAuth does after validating the token.
+		identity.NewContext(r.Context(), identity.Principal{UserID: 77, Role: identity.RoleCustomer})
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	for _, path := range []string{"/orders/1", "/orders/2", "/no/such/route"} {
+		r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	}
+
+	if got := m.Value("http_requests_total", "method", "GET", "route", "/orders/{id}", "status", "404"); got != 2 {
+		t.Errorf("requests for /orders/{id} = %v, want 2 (one series for all ids)", got)
+	}
+	if got := m.Value("http_requests_total", "method", "GET", "route", "unmatched", "status", "404"); got != 1 {
+		t.Errorf("unmatched requests = %v, want 1", got)
+	}
+
+	first := strings.SplitN(logs.String(), "\n", 2)[0]
+	var line map[string]any
+	if err := json.Unmarshal([]byte(first), &line); err != nil {
+		t.Fatal(err)
+	}
+	if line["route"] != "/orders/{id}" || line["path"] != "/orders/1" {
+		t.Errorf("route = %v, path = %v", line["route"], line["path"])
+	}
+	if line["user_id"] != float64(77) {
+		t.Errorf("user_id = %v, want 77", line["user_id"])
 	}
 }

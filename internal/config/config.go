@@ -66,6 +66,10 @@ type Config struct {
 	// WorkerBatchSize caps how many orders one job run handles.
 	WorkerBatchSize int
 
+	// WorkerMetricsAddr is where the worker serves /metrics and /health
+	// (it has no other HTTP server). Empty = disabled.
+	WorkerMetricsAddr string
+
 	// RedisURL, e.g. redis://redis:6379/0. Empty = run without Redis
 	// (no product cache, no rate limiting). Redis is never required.
 	RedisURL string
@@ -112,6 +116,7 @@ func Load() (Config, error) {
 		PaymentReconcileAfter: time.Minute,
 		WorkerInterval:        10 * time.Second,
 		WorkerBatchSize:       100,
+		WorkerMetricsAddr:     getEnv("WORKER_METRICS_ADDR", ":9091"),
 		RedisURL:              os.Getenv("REDIS_URL"),
 		ProductCacheTTL:       5 * time.Minute,
 		RateLimitPerMinute:    100,

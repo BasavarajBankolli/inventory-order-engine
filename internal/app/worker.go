@@ -8,13 +8,15 @@ import (
 
 	"inventory-order-engine/internal/config"
 	"inventory-order-engine/internal/events"
+	"inventory-order-engine/internal/metrics"
 	"inventory-order-engine/internal/worker"
 )
 
 // NewWorkerJobs builds the background jobs run by cmd/worker. It uses the
 // same services as the API, so business rules exist in exactly one place.
-func NewWorkerJobs(cfg config.Config, pool *pgxpool.Pool) ([]worker.Job, error) {
-	s, err := newServices(cfg, pool, Options{})
+// m (may be nil) receives the worker's metrics.
+func NewWorkerJobs(cfg config.Config, pool *pgxpool.Pool, m *metrics.Metrics) ([]worker.Job, error) {
+	s, err := newServices(cfg, pool, Options{Metrics: m})
 	if err != nil {
 		return nil, err
 	}
@@ -40,6 +42,7 @@ func NewWorkerJobs(cfg config.Config, pool *pgxpool.Pool) ([]worker.Job, error) 
 		Name: "publish-outbox",
 		Run: func(ctx context.Context) error {
 			res, err := processor.Drain(ctx, cfg.WorkerBatchSize, 20)
+			m.OutboxProcessed(res.Published, res.Retrying, res.Dead)
 			if res.Published+res.Retrying+res.Dead > 0 {
 				slog.InfoContext(ctx, "publish-outbox run finished",
 					"published", res.Published, "retrying", res.Retrying, "dead", res.Dead)

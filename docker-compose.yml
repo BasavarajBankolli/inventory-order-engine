@@ -30,6 +30,9 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+    # Come back after a Docker/PC restart (the API and worker cannot work
+    # without the database).
+    restart: unless-stopped
 
   migrate:
     build: .
@@ -88,6 +91,7 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+    restart: unless-stopped
 
   worker:
     build: .
@@ -101,6 +105,14 @@ services:
       PAYMENT_RECONCILE_AFTER: ${PAYMENT_RECONCILE_AFTER:-1m}
       OUTBOX_MAX_ATTEMPTS: ${OUTBOX_MAX_ATTEMPTS:-10}
       OUTBOX_FAILURE_RATE: ${OUTBOX_FAILURE_RATE:-0}
+      WORKER_METRICS_ADDR: ":9091"
+    ports:
+      - "${WORKER_METRICS_PORT:-9091}:9091"   # /metrics and /health
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9091/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     depends_on:
       migrate:
         condition: service_completed_successfully

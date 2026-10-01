@@ -135,6 +135,7 @@ func (s *Service) Pay(ctx context.Context, caller identity.Principal, orderID in
 	})
 	cancel()
 	if err != nil {
+		s.metrics.PaymentFailed("timeout")
 		slog.WarnContext(ctx, "payment outcome unknown; order stays PAYMENT_PENDING",
 			"order_id", orderID, "payment_id", pay.ID, "error", err)
 		return PayResult{Order: o, Payment: pay}, fmt.Errorf("%w: %w", ErrPaymentOutcomeUnknown, err)
@@ -150,6 +151,7 @@ func (s *Service) completePayment(ctx context.Context, orderID, paymentID int64,
 		pay            payments.Payment
 		declined       bool
 		refundRequired bool
+		finished       int // reservations confirmed/released by THIS call (0 if a concurrent call did it)
 	)
 	err := database.WithTx(ctx, s.pool, func(tx pgx.Tx) error {
 		repo := s.orders.WithTx(tx)
@@ -182,7 +184,7 @@ func (s *Service) completePayment(ctx context.Context, orderID, paymentID int64,
 			if err := s.transition(ctx, repo, &o, StatusConfirmed); err != nil {
 				return err
 			}
-			if _, err := s.inventory.ConfirmForOrder(ctx, tx, orderID); err != nil {
+			if finished, err = s.inventory.ConfirmForOrder(ctx, tx, orderID); err != nil {
 				return err
 			}
 			return s.emit(ctx, tx, events.OrderConfirmed, orderID, orderConfirmedPayload{
@@ -202,7 +204,7 @@ func (s *Service) completePayment(ctx context.Context, orderID, paymentID int64,
 		if err := s.transition(ctx, repo, &o, StatusCancelled); err != nil {
 			return err
 		}
-		if _, err := s.inventory.ReleaseForOrder(ctx, tx, orderID, inventory.ReservationReleased); err != nil {
+		if finished, err = s.inventory.ReleaseForOrder(ctx, tx, orderID, inventory.ReservationReleased); err != nil {
 			return err
 		}
 		return s.emit(ctx, tx, events.OrderCancelled, orderID,
@@ -222,6 +224,18 @@ func (s *Service) completePayment(ctx context.Context, orderID, paymentID int64,
 	if err != nil {
 		return PayResult{}, err
 	}
+	// Metrics after COMMIT, and only if THIS call recorded the outcome
+	// (finished > 0): a concurrent duplicate Pay must not count it twice.
+	if finished > 0 {
+		if declined {
+			s.metrics.PaymentFailed("declined")
+			s.metrics.ReservationsFinished("released", finished)
+		} else {
+			s.metrics.PaymentSucceeded()
+			s.metrics.ReservationsFinished("confirmed", finished)
+		}
+	}
+
 	if declined {
 		slog.InfoContext(ctx, "payment declined; order cancelled and stock released",
 			"order_id", orderID, "payment_id", paymentID, "reason", pay.FailureReason)

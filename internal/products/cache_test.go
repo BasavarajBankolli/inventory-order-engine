@@ -12,6 +12,7 @@ import (
 
 	"inventory-order-engine/internal/cache"
 	"inventory-order-engine/internal/inventory"
+	"inventory-order-engine/internal/metrics"
 	"inventory-order-engine/internal/products"
 	"inventory-order-engine/internal/testutil"
 )
@@ -22,7 +23,7 @@ func newCachedService(t *testing.T, rdb *redis.Client, prefix string) (*products
 	t.Helper()
 	pool := testutil.NewMigratedPool(t)
 	svc := products.NewService(pool, products.NewRepository(pool), inventory.NewRepository(pool),
-		cache.NewProductCache(rdb, time.Minute, prefix))
+		cache.NewProductCache(rdb, time.Minute, prefix), nil)
 	return svc, pool
 }
 
@@ -95,7 +96,7 @@ func TestCache_NotFoundIsNotCached(t *testing.T) {
 func TestCache_RedisDownFallsBackToDatabase(t *testing.T) {
 	pool := testutil.NewMigratedPool(t)
 	svc := products.NewService(pool, products.NewRepository(pool), inventory.NewRepository(pool),
-		cache.NewProductCache(testutil.NewBrokenRedis(t), time.Minute, ""))
+		cache.NewProductCache(testutil.NewBrokenRedis(t), time.Minute, ""), nil)
 	ctx := context.Background()
 	p := create(t, svc)
 
@@ -109,5 +110,32 @@ func TestCache_RedisDownFallsBackToDatabase(t *testing.T) {
 	}
 	if got, _ := svc.Get(ctx, p.ID); got.Name != name {
 		t.Errorf("name = %q, want %q", got.Name, name)
+	}
+}
+
+// Cache lookups are counted as hit / miss / error.
+func TestCache_Metrics(t *testing.T) {
+	ctx := context.Background()
+	m := metrics.New()
+
+	rdb, prefix := testutil.NewRedis(t)
+	pool := testutil.NewMigratedPool(t)
+	svc := products.NewService(pool, products.NewRepository(pool), inventory.NewRepository(pool),
+		cache.NewProductCache(rdb, time.Minute, prefix), m)
+	p := create(t, svc)
+	_, _ = svc.Get(ctx, p.ID) // miss -> stored
+	_, _ = svc.Get(ctx, p.ID) // hit
+	_, _ = svc.Get(ctx, p.ID) // hit
+
+	broken := products.NewService(pool, products.NewRepository(pool), inventory.NewRepository(pool),
+		cache.NewProductCache(testutil.NewBrokenRedis(t), time.Minute, ""), m)
+	if _, err := broken.Get(ctx, p.ID); err != nil {
+		t.Fatalf("Redis down must fall back to PostgreSQL: %v", err)
+	}
+
+	for result, want := range map[string]float64{"miss": 1, "hit": 2, "error": 1} {
+		if got := m.Value("product_cache_requests_total", "result", result); got != want {
+			t.Errorf("%s = %v, want %v", result, got, want)
+		}
 	}
 }

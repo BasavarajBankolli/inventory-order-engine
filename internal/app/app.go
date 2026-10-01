@@ -22,6 +22,7 @@ import (
 	"inventory-order-engine/internal/events"
 	"inventory-order-engine/internal/health"
 	"inventory-order-engine/internal/inventory"
+	"inventory-order-engine/internal/metrics"
 	"inventory-order-engine/internal/orders"
 	"inventory-order-engine/internal/payments"
 	"inventory-order-engine/internal/products"
@@ -41,6 +42,9 @@ type Options struct {
 
 	// RedisKeyPrefix keeps keys of parallel tests apart. Production: "".
 	RedisKeyPrefix string
+
+	// Metrics is optional. nil = no metrics recorded and no /metrics.
+	Metrics *metrics.Metrics
 }
 
 // services holds every business service, built once.
@@ -92,13 +96,14 @@ func newServices(cfg config.Config, pool *pgxpool.Pool, opts Options) (*services
 		ReservationTTL: cfg.ReservationTTL,
 		PaymentTimeout: cfg.PaymentTimeout,
 		ReconcileAfter: cfg.PaymentReconcileAfter,
+		Metrics:        opts.Metrics,
 	})
 
 	return &services{
 		userRepo:  userRepo,
 		tokens:    tokens,
 		auth:      authService,
-		products:  products.NewService(pool, productRepo, inventoryRepo, productCache),
+		products:  products.NewService(pool, productRepo, inventoryRepo, productCache, opts.Metrics),
 		inventory: inventoryService,
 		orders:    orderService,
 	}, nil
@@ -113,15 +118,16 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts
 
 	checks := []health.Check{{Name: "postgres", Fn: pool.Ping, Required: true}}
 	deps := server.Deps{
-		Logger:      logger,
-		Auth:        auth.NewHandler(s.auth),
-		Users:       users.NewHandler(s.userRepo),
-		Products:    products.NewHandler(s.products),
-		Inventory:   inventory.NewHandler(s.inventory),
-		Orders:      orders.NewHandler(s.orders),
-		RequireAuth: auth.RequireAuth(s.tokens),
+		Logger:  logger,
+		Metrics: opts.Metrics,
 
 		CORSAllowedOrigins: cfg.CORSAllowedOrigins,
+		Auth:               auth.NewHandler(s.auth),
+		Users:              users.NewHandler(s.userRepo),
+		Products:           products.NewHandler(s.products),
+		Inventory:          inventory.NewHandler(s.inventory),
+		Orders:             orders.NewHandler(s.orders),
+		RequireAuth:        auth.RequireAuth(s.tokens),
 	}
 
 	if opts.Redis != nil {
@@ -132,8 +138,8 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts
 
 		if cfg.RateLimitPerMinute > 0 {
 			limiter := ratelimit.NewLimiter(opts.Redis, cfg.RateLimitPerMinute, time.Minute, opts.RedisKeyPrefix)
-			deps.RateLimitByIP = ratelimit.Middleware(limiter, ratelimit.ByIP)
-			deps.RateLimitByUser = ratelimit.Middleware(limiter, ratelimit.ByUser)
+			deps.RateLimitByIP = ratelimit.Middleware(limiter, ratelimit.ByIP, opts.Metrics)
+			deps.RateLimitByUser = ratelimit.Middleware(limiter, ratelimit.ByUser, opts.Metrics)
 		}
 	}
 	deps.Health = health.NewHandler(checks...)

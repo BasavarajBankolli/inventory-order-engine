@@ -9,6 +9,7 @@ import (
 
 	"inventory-order-engine/internal/httpx"
 	"inventory-order-engine/internal/identity"
+	"inventory-order-engine/internal/metrics"
 )
 
 // KeyFunc picks WHO a request is counted against.
@@ -46,7 +47,8 @@ func ByUser(r *http.Request) string {
 // logged). Rate limiting is protection, not correctness - refusing every
 // request because the counter store is down would turn a Redis outage into
 // a full API outage. (A bank's login endpoint might choose to fail closed.)
-func Middleware(l *Limiter, key KeyFunc) func(http.Handler) http.Handler {
+// m may be nil (no metrics).
+func Middleware(l *Limiter, key KeyFunc, m *metrics.Metrics) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			d, err := l.Allow(r.Context(), key(r))
@@ -62,6 +64,7 @@ func Middleware(l *Limiter, key KeyFunc) func(http.Handler) http.Handler {
 			w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(d.Remaining))
 
 			if !d.Allowed {
+				m.RateLimited()
 				retry := int(math.Ceil(d.RetryAfter.Seconds()))
 				w.Header().Set("Retry-After", strconv.Itoa(retry))
 				httpx.WriteError(w, r, http.StatusTooManyRequests, httpx.CodeRateLimited,

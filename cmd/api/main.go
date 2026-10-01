@@ -20,6 +20,7 @@ import (
 	"inventory-order-engine/internal/config"
 	"inventory-order-engine/internal/database"
 	"inventory-order-engine/internal/logging"
+	"inventory-order-engine/internal/metrics"
 )
 
 func main() {
@@ -57,7 +58,7 @@ func run() error {
 	// Redis is optional. Without REDIS_URL the API runs without a product
 	// cache and without rate limiting. With it, Redis being DOWN is also
 	// fine: the client connects lazily and every use falls back gracefully.
-	opts := app.Options{}
+	opts := app.Options{Metrics: metrics.New()}
 	if cfg.RedisURL != "" {
 		rdb, err := cache.NewRedisClient(cfg.RedisURL)
 		if err != nil {

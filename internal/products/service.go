@@ -12,6 +12,7 @@ import (
 
 	"inventory-order-engine/internal/database"
 	"inventory-order-engine/internal/inventory"
+	"inventory-order-engine/internal/metrics"
 	"inventory-order-engine/internal/validate"
 )
 
@@ -25,7 +26,8 @@ type Service struct {
 	pool      *pgxpool.Pool // to start transactions
 	repo      *Repository
 	inventory *inventory.Repository
-	cache     Cache // may be nil: then every read goes to PostgreSQL
+	cache     Cache            // may be nil: then every read goes to PostgreSQL
+	metrics   *metrics.Metrics // may be nil
 }
 
 // Cache is a read-through cache for single products (Redis in production,
@@ -40,9 +42,9 @@ type Cache interface {
 	Delete(ctx context.Context, id int64) error
 }
 
-// NewService creates a products Service. cache may be nil.
-func NewService(pool *pgxpool.Pool, repo *Repository, inv *inventory.Repository, cache Cache) *Service {
-	return &Service{pool: pool, repo: repo, inventory: inv, cache: cache}
+// NewService creates a products Service. cache and m may be nil.
+func NewService(pool *pgxpool.Pool, repo *Repository, inv *inventory.Repository, cache Cache, m *metrics.Metrics) *Service {
+	return &Service{pool: pool, repo: repo, inventory: inv, cache: cache, metrics: m}
 }
 
 // CreateInput is the data needed to create a product.
@@ -125,11 +127,16 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Product, error) {
 func (s *Service) Get(ctx context.Context, id int64) (Product, error) {
 	if s.cache != nil {
 		p, found, err := s.cache.Get(ctx, id)
-		if err != nil {
+		switch {
+		case err != nil:
+			s.metrics.ProductCache("error")
 			slog.WarnContext(ctx, "product cache read failed; using database", "product_id", id, "error", err)
-		} else if found {
+		case found:
+			s.metrics.ProductCache("hit")
 			slog.DebugContext(ctx, "product cache hit", "product_id", id)
 			return p, nil
+		default:
+			s.metrics.ProductCache("miss")
 		}
 	}
 

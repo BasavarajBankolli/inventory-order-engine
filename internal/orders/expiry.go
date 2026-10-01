@@ -73,6 +73,7 @@ func (s *Service) ExpireOverdue(ctx context.Context, batchSize int) (ExpiryRepor
 
 // expireReserved expires one RESERVED order if (still) overdue.
 func (s *Service) expireReserved(ctx context.Context, orderID int64) (changed bool, err error) {
+	var releasedCount int // for metrics, set inside the transaction
 	err = database.WithTx(ctx, s.pool, func(tx pgx.Tx) error {
 		repo := s.orders.WithTx(tx)
 		o, err := repo.GetForUpdate(ctx, orderID)
@@ -103,8 +104,12 @@ func (s *Service) expireReserved(ctx context.Context, orderID int64) (changed bo
 		changed = true
 		slog.InfoContext(ctx, "reservation expired; order expired and stock released",
 			"order_id", orderID, "reservations_released", released)
+		releasedCount = released
 		return nil
 	})
+	if err == nil {
+		s.metrics.ReservationsFinished("expired", releasedCount) // after COMMIT
+	}
 	return changed, err
 }
 
@@ -165,6 +170,7 @@ func (s *Service) reconcile(ctx context.Context, orderID int64, rep *ExpiryRepor
 // expireUncharged expires a PAYMENT_PENDING order whose charge never reached
 // the provider: payment FAILED, order EXPIRED, stock released.
 func (s *Service) expireUncharged(ctx context.Context, orderID, paymentID int64) (changed bool, err error) {
+	var expired int
 	err = database.WithTx(ctx, s.pool, func(tx pgx.Tx) error {
 		repo := s.orders.WithTx(tx)
 		o, err := repo.GetForUpdate(ctx, orderID)
@@ -180,7 +186,7 @@ func (s *Service) expireUncharged(ctx context.Context, orderID, paymentID int64)
 		if err := s.transition(ctx, repo, &o, StatusExpired); err != nil {
 			return err
 		}
-		if _, err := s.inventory.ReleaseForOrder(ctx, tx, orderID, inventory.ReservationExpired); err != nil {
+		if expired, err = s.inventory.ReleaseForOrder(ctx, tx, orderID, inventory.ReservationExpired); err != nil {
 			return err
 		}
 		if err := s.emit(ctx, tx, events.OrderExpired, orderID,
@@ -191,5 +197,8 @@ func (s *Service) expireUncharged(ctx context.Context, orderID, paymentID int64)
 		slog.InfoContext(ctx, "reconcile: charge never happened; order expired and stock released", "order_id", orderID)
 		return nil
 	})
+	if err == nil {
+		s.metrics.ReservationsFinished("expired", expired) // after COMMIT
+	}
 	return changed, err
 }

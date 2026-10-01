@@ -14,6 +14,7 @@ import (
 	"inventory-order-engine/internal/events"
 	"inventory-order-engine/internal/identity"
 	"inventory-order-engine/internal/inventory"
+	"inventory-order-engine/internal/metrics"
 	"inventory-order-engine/internal/payments"
 	"inventory-order-engine/internal/products"
 	"inventory-order-engine/internal/validate"
@@ -33,6 +34,7 @@ type Service struct {
 	payments  *payments.Repository
 	provider  payments.Provider
 	outbox    *events.Outbox
+	metrics   *metrics.Metrics // may be nil
 
 	reservationTTL time.Duration // how long stock is held for an unpaid order
 	paymentTimeout time.Duration // how long we wait for the payment provider
@@ -49,6 +51,7 @@ type Deps struct {
 	Payments       *payments.Repository
 	Provider       payments.Provider
 	Outbox         *events.Outbox
+	Metrics        *metrics.Metrics // optional: nil records nothing
 	ReservationTTL time.Duration
 	PaymentTimeout time.Duration
 	// ReconcileAfter: how long after a reservation expired the worker waits
@@ -67,6 +70,7 @@ func NewService(d Deps) *Service {
 		payments:       d.Payments,
 		provider:       d.Provider,
 		outbox:         d.Outbox,
+		metrics:        d.Metrics,
 		reservationTTL: d.ReservationTTL,
 		paymentTimeout: d.PaymentTimeout,
 		reconcileAfter: d.ReconcileAfter,
@@ -95,7 +99,43 @@ func (s *Service) Create(ctx context.Context, caller identity.Principal, request
 // OUT_OF_STOCK) left no row behind, so retrying it with the same key is a
 // genuinely new attempt - which is what a client retrying after an error
 // wants.
-func (s *Service) CreateWithKey(ctx context.Context, caller identity.Principal, requested []ItemRequest, key string) (o Order, replayed bool, err error) {
+func (s *Service) CreateWithKey(ctx context.Context, caller identity.Principal, requested []ItemRequest, key string) (Order, bool, error) {
+	o, replayed, err := s.createWithKey(ctx, caller, requested, key)
+
+	// Metrics are recorded here, AFTER the outcome is final (the transaction
+	// has committed or rolled back), so a rolled-back order is never counted
+	// as created. A replay is neither a new order nor a failure.
+	switch {
+	case err != nil:
+		s.metrics.OrderFailed(failureReason(err))
+	case !replayed:
+		s.metrics.OrderCreated(len(o.Items))
+	}
+	return o, replayed, err
+}
+
+// failureReason maps an order-creation error to a small, fixed set of
+// metric label values (never the raw error text: that would create a new
+// time series per message).
+func failureReason(err error) string {
+	var verr validate.Errors
+	switch {
+	case errors.As(err, &verr):
+		return "validation"
+	case errors.Is(err, inventory.ErrOutOfStock):
+		return "out_of_stock"
+	case errors.Is(err, ErrProductUnavailable):
+		return "product_unavailable"
+	case errors.Is(err, ErrIdempotencyKeyReused):
+		return "idempotency_key_reused"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "cancelled"
+	default:
+		return "internal"
+	}
+}
+
+func (s *Service) createWithKey(ctx context.Context, caller identity.Principal, requested []ItemRequest, key string) (o Order, replayed bool, err error) {
 	if err := validateItems(requested); err != nil {
 		return Order{}, false, err
 	}
@@ -365,6 +405,7 @@ func (s *Service) Cancel(ctx context.Context, caller identity.Principal, id int6
 		return Order{}, err
 	}
 
+	s.metrics.ReservationsFinished("released", released) // after COMMIT
 	slog.InfoContext(ctx, "order cancelled", "order_id", updated.ID, "reservations_released", released)
 	return updated, nil
 }
