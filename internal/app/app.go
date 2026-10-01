@@ -122,6 +122,7 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts
 		Metrics: opts.Metrics,
 
 		CORSAllowedOrigins: cfg.CORSAllowedOrigins,
+		MetricsToken:       cfg.MetricsToken,
 		Auth:               auth.NewHandler(s.auth),
 		Users:              users.NewHandler(s.userRepo),
 		Products:           products.NewHandler(s.products),
@@ -138,8 +139,8 @@ func NewHandler(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, opts
 
 		if cfg.RateLimitPerMinute > 0 {
 			limiter := ratelimit.NewLimiter(opts.Redis, cfg.RateLimitPerMinute, time.Minute, opts.RedisKeyPrefix)
-			deps.RateLimitByIP = ratelimit.Middleware(limiter, ratelimit.ByIP, opts.Metrics)
-			deps.RateLimitByUser = ratelimit.Middleware(limiter, ratelimit.ByUser, opts.Metrics)
+			deps.RateLimitByIP = ratelimit.Middleware(limiter, ratelimit.ByIP(cfg.TrustedProxyHops), opts.Metrics)
+			deps.RateLimitByUser = ratelimit.Middleware(limiter, ratelimit.ByUser(cfg.TrustedProxyHops), opts.Metrics)
 		}
 	}
 	deps.Health = health.NewHandler(checks...)

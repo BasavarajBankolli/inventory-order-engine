@@ -20,6 +20,8 @@ import (
 // (dependency injection) instead of being read from a global variable.
 type Config struct {
 	// HTTPAddr is the address the API server listens on, e.g. ":8080".
+	// HTTP_ADDR wins; otherwise PORT (set by hosting platforms such as
+	// Render or Heroku) becomes ":<PORT>"; otherwise ":8080".
 	HTTPAddr string
 
 	// DatabaseURL is the PostgreSQL connection string, e.g.
@@ -93,6 +95,27 @@ type Config struct {
 	// e.g. http://localhost:5173,https://my-shop.vercel.app ("*" = any).
 	// Empty = CORS disabled.
 	CORSAllowedOrigins []string
+
+	// TrustedProxyHops is how many reverse proxies (load balancers) sit in
+	// front of the API and append to X-Forwarded-For. 0 (default, local
+	// Docker) = use the TCP peer address and ignore the header. 1 on Render.
+	// Only used to find the client IP for rate limiting.
+	TrustedProxyHops int
+
+	// MigrateOnStart makes the API apply pending migrations before serving.
+	// For hosts without a separate release step (e.g. Render's free plan);
+	// safe with several instances because the runner takes an advisory lock.
+	MigrateOnStart bool
+
+	// MetricsToken, if set, protects GET /metrics: Prometheus must send
+	// "Authorization: Bearer <token>". Use it when /metrics is reachable
+	// from the internet (e.g. on Render).
+	MetricsToken string
+
+	// RunWorker makes the API process also run the background jobs, for
+	// hosts where a separate worker process costs extra. Safe even if a
+	// separate worker runs too: every job is idempotent and uses row locks.
+	RunWorker bool
 }
 
 // minJWTSecretLen: HMAC-SHA256 keys shorter than 32 bytes (256 bits) are
@@ -103,7 +126,7 @@ const minJWTSecretLen = 32
 // It returns an error (instead of panicking) so main() decides what to do.
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:              getEnv("HTTP_ADDR", ":8080"),
+		HTTPAddr:              getEnv("HTTP_ADDR", portAddr(os.Getenv("PORT"))),
 		DatabaseURL:           os.Getenv("DATABASE_URL"),
 		DBMaxConns:            10,
 		LogLevel:              slog.LevelInfo,
@@ -118,6 +141,7 @@ func Load() (Config, error) {
 		WorkerBatchSize:       100,
 		WorkerMetricsAddr:     getEnv("WORKER_METRICS_ADDR", ":9091"),
 		RedisURL:              os.Getenv("REDIS_URL"),
+		MetricsToken:          os.Getenv("METRICS_TOKEN"),
 		ProductCacheTTL:       5 * time.Minute,
 		RateLimitPerMinute:    100,
 		OutboxMaxAttempts:     10,
@@ -239,6 +263,22 @@ func Load() (Config, error) {
 		cfg.OutboxFailureRate = f
 	}
 
+	if v := os.Getenv("TRUSTED_PROXY_HOPS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > 10 {
+			return Config{}, fmt.Errorf("TRUSTED_PROXY_HOPS must be between 0 and 10, got %q", v)
+		}
+		cfg.TrustedProxyHops = n
+	}
+
+	var err error
+	if cfg.MigrateOnStart, err = getBool("MIGRATE_ON_START"); err != nil {
+		return Config{}, err
+	}
+	if cfg.RunWorker, err = getBool("RUN_WORKER"); err != nil {
+		return Config{}, err
+	}
+
 	for _, o := range strings.Split(os.Getenv("CORS_ALLOWED_ORIGINS"), ",") {
 		// Browsers send the origin without a trailing slash.
 		if o = strings.TrimRight(strings.TrimSpace(o), "/"); o != "" {
@@ -270,6 +310,27 @@ func LoadAPI() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// portAddr turns the PORT variable into a listen address.
+func portAddr(port string) string {
+	if port == "" {
+		return ":8080"
+	}
+	return ":" + port
+}
+
+// getBool reads true/false (also 1/0); unset means false.
+func getBool(key string) (bool, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return false, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("%s must be true or false, got %q", key, v)
+	}
+	return b, nil
 }
 
 func getEnv(key, fallback string) string {

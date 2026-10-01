@@ -11,6 +11,11 @@
 //
 //	go run ./cmd/concurrency-demo -mode idempotency -buyers 50
 //
+// Mode "payment-failure" - one buyer reserves stock, the payment is
+// declined, and the reservation is released: the stock comes back.
+//
+//	go run ./cmd/concurrency-demo -mode payment-failure -stock 5 -quantity 2
+//
 // It needs an ADMIN account (to create the demo product and its stock); see
 // "Creating an admin" in the README. Buyer accounts are created on the fly.
 package main
@@ -37,12 +42,12 @@ func main() {
 		buyers    = flag.Int("buyers", 100, "number of concurrent buyers")
 		stock     = flag.Int("stock", 1, "units in stock before the race")
 		quantity  = flag.Int("quantity", 1, "units each buyer orders")
-		mode      = flag.String("mode", "stock", `"stock" (many buyers, scarce stock) or "idempotency" (one buyer, one key, many retries)`)
+		mode      = flag.String("mode", "stock", `"stock" (many buyers, scarce stock), "idempotency" (one buyer, one key, many retries) or "payment-failure"`)
 	)
 	flag.Parse()
 
-	if *mode != "stock" && *mode != "idempotency" {
-		fmt.Fprintln(os.Stderr, `error: -mode must be "stock" or "idempotency"`)
+	if *mode != "stock" && *mode != "idempotency" && *mode != "payment-failure" {
+		fmt.Fprintln(os.Stderr, `error: -mode must be "stock", "idempotency" or "payment-failure"`)
 		os.Exit(2)
 	}
 	if err := run(*mode, *base, *adminUser, *adminPass, *buyers, *stock, *quantity); err != nil {
@@ -81,6 +86,10 @@ func run(mode, base, adminEmail, adminPassword string, buyers, stock, quantity i
 	if err := c.call("PATCH", fmt.Sprintf("/api/v1/products/%d/inventory", product.ID), adminToken,
 		map[string]any{"adjustment": stock}, http.StatusOK, nil); err != nil {
 		return fmt.Errorf("add stock: %w", err)
+	}
+
+	if mode == "payment-failure" {
+		return runPaymentFailure(c, adminToken, product.ID, stock, quantity)
 	}
 
 	// In idempotency mode every request comes from the same buyer and
@@ -137,6 +146,69 @@ func run(mode, base, adminEmail, adminPassword string, buyers, stock, quantity i
 		return reportIdempotency(results, elapsed, quantity, inv.Available, inv.Reserved)
 	}
 	return report(results, elapsed, stock, quantity, inv.Available, inv.Reserved)
+}
+
+// runPaymentFailure: reserve -> payment declined -> reservation released
+// -> stock back to where it started.
+func runPaymentFailure(c *client, adminToken string, productID int64, stock, quantity int) error {
+	inventory := func() (available, reserved int, err error) {
+		var inv struct {
+			Available int `json:"available_quantity"`
+			Reserved  int `json:"reserved_quantity"`
+		}
+		err = c.call("GET", fmt.Sprintf("/api/v1/products/%d/inventory", productID), adminToken, nil, http.StatusOK, &inv)
+		return inv.Available, inv.Reserved, err
+	}
+
+	fmt.Println("3. Preparing 1 buyer account")
+	tokens, err := c.prepareBuyers(1)
+	if err != nil {
+		return err
+	}
+	buyer := tokens[0]
+
+	var order struct {
+		ID     int64  `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := c.call("POST", "/api/v1/orders", buyer,
+		map[string]any{"items": []map[string]any{{"product_id": productID, "quantity": quantity}}},
+		http.StatusCreated, &order); err != nil {
+		return fmt.Errorf("place order: %w", err)
+	}
+	avail, res, err := inventory()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("4. Order %d is %s        -> inventory available=%d reserved=%d\n", order.ID, order.Status, avail, res)
+
+	// The mock provider declines this charge (the body is a demo-only switch).
+	var payErr struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := c.call("POST", fmt.Sprintf("/api/v1/orders/%d/pay", order.ID), buyer,
+		map[string]string{"simulate": "FAILURE"}, http.StatusPaymentRequired, &payErr); err != nil {
+		return fmt.Errorf("pay: %w", err)
+	}
+	fmt.Printf("5. Payment declined         -> 402 %s\n", payErr.Error.Code)
+
+	if err := c.call("GET", fmt.Sprintf("/api/v1/orders/%d", order.ID), buyer, nil, http.StatusOK, &order); err != nil {
+		return fmt.Errorf("read order: %w", err)
+	}
+	finalAvail, finalRes, err := inventory()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("6. Order %d is %s       -> inventory available=%d reserved=%d\n", order.ID, order.Status, finalAvail, finalRes)
+
+	if avail == stock-quantity && res == quantity &&
+		order.Status == "CANCELLED" && finalAvail == stock && finalRes == 0 {
+		fmt.Printf("\nPASS: the declined payment released the reservation; all %d unit(s) are available again.\n", stock)
+		return nil
+	}
+	return fmt.Errorf("FAIL: expected a CANCELLED order and available=%d reserved=0", stock)
 }
 
 type result struct {

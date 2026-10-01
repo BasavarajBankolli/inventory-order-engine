@@ -18,7 +18,8 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
 
 # ---------- Stage 2: run ----------
-# A tiny image containing only our binaries (~20 MB instead of ~800 MB).
+# A small image containing only Alpine and our three binaries (~85 MB),
+# instead of the build image with the whole Go toolchain (~360 MB + sources).
 # Alpine keeps a shell and wget, which is handy for learning/debugging
 # (`docker compose exec api sh`) and for the healthcheck.
 FROM alpine:3.22

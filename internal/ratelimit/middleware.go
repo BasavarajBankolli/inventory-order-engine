@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"inventory-order-engine/internal/httpx"
 	"inventory-order-engine/internal/identity"
@@ -17,28 +18,69 @@ type KeyFunc func(r *http.Request) string
 
 // ByIP counts requests per client IP address. Used for public routes
 // (register, login, product browsing) where there is no user yet.
-//
-// We use the TCP peer address (RemoteAddr). We do NOT trust the
-// X-Forwarded-For header: any client can put any IP in it and dodge the
-// limit. Behind a real load balancer you would configure which proxy's
-// header to trust. (Locally through Docker, every client appears as the
-// Docker gateway IP, so all anonymous traffic shares one budget.)
-func ByIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
+// trustedHops: see ClientIP.
+func ByIP(trustedHops int) KeyFunc {
+	return func(r *http.Request) string {
+		return "ip:" + ClientIP(r, trustedHops)
 	}
-	return "ip:" + host
 }
 
 // ByUser counts requests per authenticated user, falling back to the IP.
 // Must run after RequireAuth. Per-user limits are fairer than per-IP: many
 // users behind one office NAT do not share one budget.
-func ByUser(r *http.Request) string {
-	if p, ok := identity.FromContext(r.Context()); ok {
-		return "user:" + strconv.FormatInt(p.UserID, 10)
+func ByUser(trustedHops int) KeyFunc {
+	byIP := ByIP(trustedHops)
+	return func(r *http.Request) string {
+		if p, ok := identity.FromContext(r.Context()); ok {
+			return "user:" + strconv.FormatInt(p.UserID, 10)
+		}
+		return byIP(r)
 	}
-	return ByIP(r)
+}
+
+// ClientIP finds the IP address of the real client.
+//
+// trustedHops = 0 (local Docker, direct connections): the TCP peer address
+// (RemoteAddr). X-Forwarded-For is IGNORED, because any client can put any
+// IP in it and dodge the limit.
+//
+// trustedHops = N (N load balancers in front, e.g. 1 on Render): the API
+// only ever talks to the load balancer, so RemoteAddr is the SAME for every
+// visitor. Each trusted proxy APPENDS the address it received the request
+// from to X-Forwarded-For, so the entry N places from the right was written
+// by our outermost proxy: that is the client. Entries further left were
+// sent by the client and may be forged, so they are never used:
+//
+//	X-Forwarded-For: 6.6.6.6, 203.0.113.7    (6.6.6.6 forged by the client)
+//	                          ^ appended by our 1 trusted proxy -> client IP
+//
+// If the header has fewer entries than expected (the request did not come
+// through the proxy), we fall back to RemoteAddr.
+func ClientIP(r *http.Request, trustedHops int) string {
+	peer, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peer = r.RemoteAddr
+	}
+	if trustedHops <= 0 {
+		return peer
+	}
+
+	var hops []string
+	for _, header := range r.Header.Values("X-Forwarded-For") {
+		for _, h := range strings.Split(header, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				hops = append(hops, h)
+			}
+		}
+	}
+	if len(hops) < trustedHops {
+		return peer
+	}
+	ip := hops[len(hops)-trustedHops]
+	if net.ParseIP(ip) == nil { // garbage must not become a rate-limit key
+		return peer
+	}
+	return ip
 }
 
 // Middleware rejects requests over the limit with 429 Too Many Requests.

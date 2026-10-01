@@ -45,6 +45,10 @@ type Deps struct {
 	// Metrics (Stage 14). nil = no metrics and no /metrics endpoint.
 	Metrics *metrics.Metrics
 
+	// MetricsToken, if set, is required as "Authorization: Bearer <token>"
+	// on /metrics (for deployments where the endpoint is publicly reachable).
+	MetricsToken string
+
 	// Rate limiters (Stage 11). nil = no rate limiting (e.g. no Redis).
 	RateLimitByIP   func(http.Handler) http.Handler // public routes
 	RateLimitByUser func(http.Handler) http.Handler // authenticated routes
@@ -82,8 +86,10 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/ready", d.Health.Ready)
 	if d.Metrics != nil {
 		// Prometheus scrapes this. In production, expose it only to the
-		// monitoring network (it reveals internal details), never publicly.
-		r.Method(http.MethodGet, "/metrics", d.Metrics.Handler())
+		// monitoring network (it reveals internal details), or - where it
+		// is reachable from the internet - protect it with METRICS_TOKEN.
+		r.With(middleware.StaticBearerToken(d.MetricsToken)).
+			Method(http.MethodGet, "/metrics", d.Metrics.Handler())
 	}
 
 	// Versioned business API.

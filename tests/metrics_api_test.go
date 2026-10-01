@@ -63,3 +63,36 @@ func TestMetricsEndpoint_DisabledWithoutMetrics(t *testing.T) {
 	resp.Body.Close()
 	expectStatus(t, resp, http.StatusNotFound)
 }
+
+// METRICS_TOKEN set: /metrics needs "Authorization: Bearer <token>".
+func TestMetricsEndpoint_TokenProtected(t *testing.T) {
+	api := newTestAPIWith(t, func(c *config.Config, o *app.Options) {
+		o.Metrics = metrics.New()
+		c.MetricsToken = "scrape-secret"
+	})
+
+	get := func(auth string) int {
+		req, _ := http.NewRequest(http.MethodGet, api.srv.URL+"/metrics", nil)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	for auth, want := range map[string]int{
+		"":                     http.StatusUnauthorized,
+		"Bearer wrong":         http.StatusUnauthorized,
+		"scrape-secret":        http.StatusUnauthorized, // scheme missing
+		"Bearer scrape-secret": http.StatusOK,
+	} {
+		if got := get(auth); got != want {
+			t.Errorf("Authorization %q: status %d, want %d", auth, got, want)
+		}
+	}
+	// Business endpoints are unaffected by the metrics token.
+	expectStatus(t, api.do("GET", "/api/v1/products", nil, "", nil), http.StatusOK)
+}

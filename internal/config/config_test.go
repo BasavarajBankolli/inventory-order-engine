@@ -10,6 +10,7 @@ func TestLoad_Defaults(t *testing.T) {
 	// t.Setenv sets the variable for this test only and restores it after.
 	t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5432/db")
 	t.Setenv("HTTP_ADDR", "")
+	t.Setenv("PORT", "")
 	t.Setenv("DB_MAX_CONNS", "")
 	t.Setenv("LOG_LEVEL", "")
 	t.Setenv("SHUTDOWN_TIMEOUT", "")
@@ -132,6 +133,50 @@ func TestLoad_Errors(t *testing.T) {
 
 			if _, err := Load(); err == nil {
 				t.Fatal("Load() error = nil, want an error")
+			}
+		})
+	}
+}
+
+// Hosting platforms (Render, Heroku, Fly) tell the app which port to use
+// through PORT. HTTP_ADDR, when set, still wins.
+func TestLoad_PortFallback(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5432/db")
+	t.Setenv("HTTP_ADDR", "")
+	t.Setenv("PORT", "10000")
+	if cfg, err := Load(); err != nil || cfg.HTTPAddr != ":10000" {
+		t.Errorf("PORT=10000: HTTPAddr = %q, err = %v; want :10000", cfg.HTTPAddr, err)
+	}
+
+	t.Setenv("HTTP_ADDR", ":9090")
+	if cfg, _ := Load(); cfg.HTTPAddr != ":9090" {
+		t.Errorf("HTTP_ADDR must win over PORT, got %q", cfg.HTTPAddr)
+	}
+}
+
+func TestLoad_DeploymentSwitches(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5432/db")
+	for _, k := range []string{"TRUSTED_PROXY_HOPS", "MIGRATE_ON_START", "RUN_WORKER"} {
+		t.Setenv(k, "")
+	}
+	cfg, err := Load()
+	if err != nil || cfg.TrustedProxyHops != 0 || cfg.MigrateOnStart || cfg.RunWorker {
+		t.Fatalf("defaults: %+v, %v; want all off", cfg, err)
+	}
+
+	t.Setenv("TRUSTED_PROXY_HOPS", "1")
+	t.Setenv("MIGRATE_ON_START", "true")
+	t.Setenv("RUN_WORKER", "1")
+	cfg, err = Load()
+	if err != nil || cfg.TrustedProxyHops != 1 || !cfg.MigrateOnStart || !cfg.RunWorker {
+		t.Errorf("set: hops=%d migrate=%v worker=%v err=%v", cfg.TrustedProxyHops, cfg.MigrateOnStart, cfg.RunWorker, err)
+	}
+
+	for k, v := range map[string]string{"TRUSTED_PROXY_HOPS": "-1", "MIGRATE_ON_START": "yes please", "RUN_WORKER": "maybe"} {
+		t.Run(k, func(t *testing.T) {
+			t.Setenv(k, v)
+			if _, err := Load(); err == nil {
+				t.Errorf("%s=%q: expected an error", k, v)
 			}
 		})
 	}

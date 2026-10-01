@@ -1,0 +1,85 @@
+# Render Blueprint: one click creates the whole backend on Render.
+# Spec: https://render.com/docs/blueprint-spec   Guide: docs/DEPLOYMENT.md
+#
+# Everything here fits Render's FREE plan:
+#   inventory-db     PostgreSQL 17      (free: expires after 30 days)
+#   inventory-redis  Key Value (Redis)  (cache + rate limiting; optional)
+#   inventory-api    Docker web service (free: sleeps after 15 min idle)
+#
+# Two free-plan workarounds, both safe by design:
+#   MIGRATE_ON_START  free services have no pre-deploy step, so the API
+#                     migrates on startup (advisory lock = never twice).
+#   RUN_WORKER        free plans have no background workers, so the API
+#                     runs the worker jobs in-process (jobs are idempotent).
+# On a paid plan, prefer the separate worker below and a pre-deploy step.
+#
+# All three resources must be in the SAME region to talk over Render's
+# private network.
+
+databases:
+  - name: inventory-db
+    plan: free
+    region: singapore
+    databaseName: inventory
+    user: app
+    postgresMajorVersion: "17"
+
+services:
+  - type: keyvalue
+    name: inventory-redis
+    plan: free
+    region: singapore
+    ipAllowList: [] # no public access: only services in this account can connect
+
+  - type: web
+    name: inventory-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile # the image starts /app/api by default
+    healthCheckPath: /health
+    autoDeployTrigger: commit # redeploy on every push to the linked branch
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: inventory-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: inventory-redis
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true # random 256-bit secret, never in git
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false # Render asks for it: your Vercel URL, e.g. https://my-shop.vercel.app
+      - key: METRICS_TOKEN
+        generateValue: true # /metrics is public on Render: Prometheus sends this as a Bearer token
+      - key: TRUSTED_PROXY_HOPS
+        value: "1" # Render's load balancer appends the client IP to X-Forwarded-For
+      - key: MIGRATE_ON_START
+        value: "true"
+      - key: RUN_WORKER
+        value: "true"
+      - key: DB_MAX_CONNS
+        value: "5" # free PostgreSQL allows few connections
+      - key: LOG_LEVEL
+        value: info
+
+  # --- Paid plan: run the worker as its own service instead -------------
+  # Set RUN_WORKER to "false" above, then uncomment:
+  #
+  # - type: worker
+  #   name: inventory-worker
+  #   runtime: docker
+  #   plan: starter
+  #   region: singapore
+  #   dockerfilePath: ./Dockerfile
+  #   dockerCommand: /app/worker
+  #   envVars:
+  #     - key: DATABASE_URL
+  #       fromDatabase:
+  #         name: inventory-db
+  #         property: connectionString
+  #     - key: DB_MAX_CONNS
+  #       value: "3"

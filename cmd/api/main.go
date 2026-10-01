@@ -21,6 +21,8 @@ import (
 	"inventory-order-engine/internal/database"
 	"inventory-order-engine/internal/logging"
 	"inventory-order-engine/internal/metrics"
+	"inventory-order-engine/internal/worker"
+	"inventory-order-engine/migrations"
 )
 
 func main() {
@@ -55,6 +57,17 @@ func run() error {
 	defer pool.Close()
 	logger.Info("connected to postgres")
 
+	// Hosts without a separate release step (Render's free plan) can let the
+	// API migrate on startup. The runner holds a PostgreSQL advisory lock,
+	// so two instances starting together never apply a migration twice.
+	if cfg.MigrateOnStart {
+		applied, err := database.Migrate(ctx, pool, migrations.FS)
+		if err != nil {
+			return err
+		}
+		logger.Info("migrations complete", "newly_applied", len(applied))
+	}
+
 	// Redis is optional. Without REDIS_URL the API runs without a product
 	// cache and without rate limiting. With it, Redis being DOWN is also
 	// fine: the client connects lazily and every use falls back gracefully.
@@ -78,6 +91,23 @@ func run() error {
 	handler, err := app.NewHandler(cfg, pool, logger, opts)
 	if err != nil {
 		return err
+	}
+
+	// RUN_WORKER=true: run the background jobs inside this process too
+	// (one service instead of two on hosts that charge per process).
+	// workerDone is closed when the job loop has stopped.
+	workerDone := make(chan struct{})
+	if cfg.RunWorker {
+		jobs, err := app.NewWorkerJobs(cfg, pool, opts.Metrics)
+		if err != nil {
+			return err
+		}
+		go func() {
+			defer close(workerDone)
+			worker.Run(ctx, logger.With("component", "worker"), cfg.WorkerInterval, jobs...)
+		}()
+	} else {
+		close(workerDone)
 	}
 
 	srv := &http.Server{
@@ -117,6 +147,9 @@ func run() error {
 	if err := <-serverErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	// Let the in-process worker finish its current job before the deferred
+	// pool.Close() pulls the database connections away from it.
+	<-workerDone
 
 	logger.Info("http server stopped cleanly")
 	return nil

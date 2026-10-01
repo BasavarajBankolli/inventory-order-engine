@@ -125,7 +125,7 @@ func okHandler() http.Handler {
 func TestMiddleware_Returns429WithHeaders(t *testing.T) {
 	rdb, prefix := testutil.NewRedis(t)
 	m := metrics.New()
-	h := Middleware(NewLimiter(rdb, 2, time.Minute, prefix), ByIP, m)(okHandler())
+	h := Middleware(NewLimiter(rdb, 2, time.Minute, prefix), ByIP(0), m)(okHandler())
 
 	send := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -157,7 +157,7 @@ func TestMiddleware_Returns429WithHeaders(t *testing.T) {
 
 // Redis down: requests are ALLOWED (fail open), not rejected.
 func TestMiddleware_FailsOpenWhenRedisIsDown(t *testing.T) {
-	h := Middleware(NewLimiter(testutil.NewBrokenRedis(t), 1, time.Minute, ""), ByIP, nil)(okHandler())
+	h := Middleware(NewLimiter(testutil.NewBrokenRedis(t), 1, time.Minute, ""), ByIP(0), nil)(okHandler())
 
 	for i := 0; i < 3; i++ {
 		rec := httptest.NewRecorder()
@@ -173,14 +173,71 @@ func TestKeyFuncs(t *testing.T) {
 	req.RemoteAddr = "198.51.100.4:40000"
 	req.Header.Set("X-Forwarded-For", "1.1.1.1") // must be ignored
 
-	if got := ByIP(req); got != "ip:198.51.100.4" {
+	if got := ByIP(0)(req); got != "ip:198.51.100.4" {
 		t.Errorf("ByIP = %q (X-Forwarded-For must not be trusted)", got)
 	}
-	if got := ByUser(req); got != "ip:198.51.100.4" {
+	if got := ByUser(0)(req); got != "ip:198.51.100.4" {
 		t.Errorf("ByUser without a user = %q, want the IP fallback", got)
 	}
 	authed := req.WithContext(identity.NewContext(req.Context(), identity.Principal{UserID: 42}))
-	if got := ByUser(authed); got != "user:42" {
+	if got := ByUser(1)(authed); got != "user:42" {
 		t.Errorf("ByUser = %q, want user:42", got)
+	}
+}
+
+// Behind N trusted proxies (e.g. Render's load balancer, N = 1), the
+// client is the entry N places from the RIGHT of X-Forwarded-For. Anything
+// further left was written by the client and can be forged.
+func TestClientIP_BehindProxies(t *testing.T) {
+	const lb = "10.0.0.5:41000" // every request arrives from the load balancer
+	cases := []struct {
+		name string
+		hops int
+		xff  []string
+		want string
+	}{
+		{"no proxy configured: header ignored", 0, []string{"203.0.113.7"}, "10.0.0.5"},
+		{"one proxy", 1, []string{"203.0.113.7"}, "203.0.113.7"},
+		{"forged entry is skipped", 1, []string{"6.6.6.6, 203.0.113.7"}, "203.0.113.7"},
+		{"two proxies", 2, []string{"203.0.113.7, 172.16.0.9"}, "203.0.113.7"},
+		{"several header lines count as one list", 1, []string{"6.6.6.6", "203.0.113.7"}, "203.0.113.7"},
+		{"header missing: peer address", 1, nil, "10.0.0.5"},
+		{"fewer entries than proxies: peer address", 2, []string{"203.0.113.7"}, "10.0.0.5"},
+		{"garbage: peer address", 1, []string{"not-an-ip"}, "10.0.0.5"},
+		{"IPv6 client", 1, []string{"2001:db8::1"}, "2001:db8::1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = lb
+			for _, v := range c.xff {
+				req.Header.Add("X-Forwarded-For", v)
+			}
+			if got := ClientIP(req, c.hops); got != c.want {
+				t.Errorf("ClientIP = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// Behind a proxy, two visitors get two separate budgets (without
+// TRUSTED_PROXY_HOPS they would share the load balancer's single budget).
+func TestMiddleware_PerClientBehindProxy(t *testing.T) {
+	rdb, prefix := testutil.NewRedis(t)
+	h := Middleware(NewLimiter(rdb, 1, time.Minute, prefix), ByIP(1), nil)(okHandler())
+
+	send := func(client string) int {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "10.0.0.5:41000"
+		req.Header.Set("X-Forwarded-For", client)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if send("203.0.113.1") != 200 || send("203.0.113.2") != 200 {
+		t.Fatal("first request of each client must pass")
+	}
+	if code := send("203.0.113.1"); code != http.StatusTooManyRequests {
+		t.Errorf("second request of client 1: %d, want 429", code)
 	}
 }
